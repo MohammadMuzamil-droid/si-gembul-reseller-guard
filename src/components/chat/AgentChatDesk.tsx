@@ -718,17 +718,28 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
           </div>
         ) : (
           <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
-            {matchedItems.map((item, idx) => (
-              <div key={idx} className="p-2.5 bg-white flex items-center justify-between text-xs">
-                <div>
-                  <span className="font-bold text-slate-900">{item.name}</span>
-                  <span className="text-slate-500 ml-2">({item.quantity}x @ Rp {item.unitPrice.toLocaleString('id-ID')})</span>
+            {matchedItems.map((item, idx) => {
+              const product = catalog.find(catalogItem => catalogItem.id === item.productId);
+              const isWeightBased = product?.unit.toLowerCase().includes('kg');
+              const pieceEquivalent = product?.pieceEquivalent ?? 1;
+
+              return (
+                <div key={idx} className="p-2.5 bg-white flex items-center justify-between text-xs">
+                  <div>
+                    <span className="font-bold text-slate-900">{item.name}</span>
+                    <span className="text-slate-500 ml-2">({item.quantity}x @ Rp {item.unitPrice.toLocaleString('id-ID')})</span>
+                    {isWeightBased && (
+                      <div className="text-emerald-700 font-medium mt-0.5">
+                        {item.quantity} kg = {item.quantity * pieceEquivalent} pcs equivalent
+                      </div>
+                    )}
+                  </div>
+                  <div className="font-bold text-slate-900">
+                    Rp {item.totalPrice.toLocaleString('id-ID')}
+                  </div>
                 </div>
-                <div className="font-bold text-slate-900">
-                  Rp {item.totalPrice.toLocaleString('id-ID')}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
