@@ -16,6 +16,7 @@ import {
 import { 
   buildOrderFromCandidate, 
   calculateOrderFinancials,
+  getCandidateConfirmationBlockers,
   matchItemsWithCatalog,
   generateBuyerInvoiceText 
 } from '../../lib/deterministicEngine';
@@ -133,6 +134,14 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
   // Create Order from Extracted Candidate
   const handleConfirmOrder = (candidate: CandidateExtraction) => {
     const finalCandidate = editedCandidate && editingCandidateId ? editedCandidate : candidate;
+    const matchedItems = matchItemsWithCatalog(
+      finalCandidate.items || [],
+      catalog,
+      settings.safeguards?.bulkDiscountThreshold ?? 20
+    );
+    if (getCandidateConfirmationBlockers(finalCandidate, matchedItems).length > 0) {
+      return;
+    }
     const order = buildOrderFromCandidate(finalCandidate, catalog, settings, userId);
     onOrderCreated(order);
     setEditingCandidateId(null);
@@ -445,6 +454,8 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
   });
   const hasAmbiguities = visibleAmbiguities.length > 0;
   const isDirectCod = activeCand.paymentMethod === 'DIRECT_COD';
+  const confirmationBlockers = getCandidateConfirmationBlockers(activeCand, matchedItems);
+  const canConfirm = confirmationBlockers.length === 0;
 
   return (
     <div className="bg-white border-2 border-slate-200 rounded-2xl p-4 shadow-sm space-y-4">
@@ -792,11 +803,32 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
         </div>
       </div>
 
+      {/* Confirmation guard: incomplete candidates cannot reach persistence. */}
+      {!canConfirm && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl space-y-1.5">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-rose-900">
+            <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>Resolve these details before creating an active order:</span>
+          </div>
+          <ul className="text-xs text-rose-800 list-disc list-inside space-y-0.5">
+            {confirmationBlockers.map((blocker) => (
+              <li key={blocker}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Confirm & Save Button */}
       <button
         type="button"
         onClick={onConfirm}
-        className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
+        disabled={!canConfirm}
+        title={canConfirm ? undefined : 'Resolve the listed details before creating an active order.'}
+        className={`w-full py-2.5 px-4 text-white font-bold text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 ${
+          canConfirm
+            ? 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 cursor-pointer'
+            : 'bg-slate-300 cursor-not-allowed'
+        }`}
       >
         <CheckCircle2 className="w-4 h-4" />
         <span>Confirm & Create Active Order</span>

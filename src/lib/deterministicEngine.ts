@@ -382,6 +382,51 @@ export function evaluateOrderExceptions(
 }
 
 /**
+ * Returns only the conditions that make a candidate unsafe to create as an
+ * active order. This is deliberately narrower than confirmation exceptions:
+ * loss and Direct COD still need an explicit human decision, but do not make a
+ * transaction structurally incomplete.
+ */
+export function getCandidateConfirmationBlockers(
+  candidate: CandidateExtraction,
+  items: OrderItem[]
+): string[] {
+  const blockers: string[] = [];
+
+  if (!candidate.buyerName?.trim()) {
+    blockers.push('Add a buyer name or customer reference.');
+  }
+
+  if (!candidate.paymentMethod) {
+    blockers.push('Choose a payment method.');
+  }
+
+  if (items.length === 0) {
+    blockers.push('Add at least one catalog product.');
+  }
+
+  for (const item of items) {
+    if (!item.productId || item.sku.startsWith('CUSTOM')) {
+      blockers.push(`Resolve the product or variant for "${item.name}" in the catalog.`);
+    }
+    if (item.unitPrice <= 0) {
+      blockers.push(`Set a valid selling price for "${item.name}".`);
+    }
+  }
+
+  const courier = candidate.courierName?.toLowerCase() || '';
+  const requiresShippingAddress = courier.length > 0 &&
+    !courier.includes('pickup') &&
+    !courier.includes('ambil') &&
+    !courier.includes('direct');
+  if (requiresShippingAddress && (candidate.recipientAddress?.trim().length || 0) < 5) {
+    blockers.push('Add a complete recipient shipping address.');
+  }
+
+  return [...new Set(blockers)];
+}
+
+/**
  * Build a Complete Reseller Order object from candidate and deterministic rules
  */
 export function buildOrderFromCandidate(
