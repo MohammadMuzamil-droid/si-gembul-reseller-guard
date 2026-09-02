@@ -1,0 +1,6 @@
+{
+  "name": "Si Gembul Reseller Guard",
+  "description": "AI Operations & Financial Control Agent for Indonesian micro-resellers with deterministic financial safeguards, multi-turn chat, evidence extraction, and Tutup Buku.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

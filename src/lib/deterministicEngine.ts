@@ -1,0 +1,619 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  CatalogProduct,
+  OrderItem,
+  FinancialBreakdown,
+  ResellerOrder,
+  CandidateExtraction,
+  PaymentMethod,
+  PaymentStatus,
+  ShippingStatus,
+  DailyCloseRecord,
+  AuditEntry,
+  ResellerSettings,
+} from '../types';
+import { INITIAL_CATALOG } from '../data/mockData';
+
+/**
+ * Robust Product Normalization & Catalog Matcher
+ * Maps natural language product names and codes to authoritative catalog products.
+ */
+export function normalizeProduct(
+  query: string,
+  candidateSku: string | undefined,
+  catalog: CatalogProduct[] = []
+): CatalogProduct | undefined {
+  // Combine user's runtime catalog with standard catalog defaults to guarantee baseline resolution
+  const combinedCatalog: CatalogProduct[] = [...catalog];
+  for (const def of INITIAL_CATALOG) {
+    if (!combinedCatalog.some(p => p.sku.toLowerCase() === def.sku.toLowerCase())) {
+      combinedCatalog.push(def);
+    }
+  }
+
+  // 1. Direct SKU match
+  if (candidateSku && candidateSku !== 'CUSTOM') {
+    const skuMatch = combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
+    if (skuMatch) return skuMatch;
+  }
+
+  const cleanQuery = (query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleanQuery) return undefined;
+
+  // 2. Exact name or SKU match
+  const exact = combinedCatalog.find(p => 
+    p.name.toLowerCase() === cleanQuery || 
+    p.sku.toLowerCase() === cleanQuery
+  );
+  if (exact) return exact;
+
+  // 3. Explicit keywords normalization for standard product variations
+  const is1kg = cleanQuery.includes('1kg') || cleanQuery.includes('1 kg') || cleanQuery.includes('1000g') || cleanQuery.includes('1000 g') || cleanQuery.includes('bulk');
+  const isMedium = cleanQuery.includes('medium') || cleanQuery.includes('med ');
+  const isPremium = cleanQuery.includes('premium') || cleanQuery.includes('prem ') || cleanQuery.includes('specialty');
+
+  if (isMedium && is1kg) {
+    const p = combinedCatalog.find(p => p.sku === 'COFFEE-MED-1KG');
+    if (p) return p;
+  }
+  if (isMedium) {
+    const p = combinedCatalog.find(p => p.sku === 'COFFEE-MED-250');
+    if (p) return p;
+  }
+  if (isPremium && is1kg) {
+    const p = combinedCatalog.find(p => p.sku === 'COFFEE-PREM-1KG');
+    if (p) return p;
+  }
+  if (isPremium) {
+    const p = combinedCatalog.find(p => p.sku === 'COFFEE-PREM-250');
+    if (p) return p;
+  }
+
+  if (cleanQuery.includes('gayo')) {
+    const p = combinedCatalog.find(p => p.sku === 'KOPI-GAYO-250');
+    if (p) return p;
+  }
+  if (cleanQuery.includes('robusta') || cleanQuery.includes('lampung')) {
+    const p = combinedCatalog.find(p => p.sku === 'KOPI-ROB-200');
+    if (p) return p;
+  }
+  if (cleanQuery.includes('drip')) {
+    const p = combinedCatalog.find(p => p.sku === 'KOPI-DRIP-10S');
+    if (p) return p;
+  }
+  if (cleanQuery.includes('madu')) {
+    const p = combinedCatalog.find(p => p.sku === 'MADU-HUTAN-350');
+    if (p) return p;
+  }
+
+  // 4. Substring name or SKU match
+  const sub = combinedCatalog.find(p => {
+    const pName = p.name.toLowerCase();
+    const pSku = p.sku.toLowerCase();
+    return pName.includes(cleanQuery) || cleanQuery.includes(pName) || pSku.includes(cleanQuery);
+  });
+  if (sub) return sub;
+
+  return undefined;
+}
+
+/**
+ * Deterministic Financial Calculations
+ * Mathematical source of truth for pricing, COGS, ongkir allocation, margins, and profit.
+ */
+export function calculateOrderFinancials(
+  items: OrderItem[],
+  buyerOngkir: number = 0,
+  quotedOngkir: number = 0,
+  sellerAbsorbedOngkir: number = 0,
+  discount: number = 0,
+  otherFees: number = 0,
+  minProfitMarginThreshold: number = 15,
+  maxLossWarningThreshold: number = 50000
+): FinancialBreakdown {
+  // 1. Calculate items subtotal and total COGS with precision
+  let subtotal = 0;
+  let totalCOGS = 0;
+
+  for (const item of items) {
+    const qty = Math.max(0, Number(item.quantity) || 0);
+    const price = Math.max(0, Number(item.unitPrice) || 0);
+    const cost = Math.max(0, Number(item.baseCost) || 0);
+    
+    subtotal += qty * price;
+    totalCOGS += qty * cost;
+  }
+
+  const safeBuyerOngkir = Math.max(0, Number(buyerOngkir) || 0);
+  const safeQuotedOngkir = Math.max(0, Number(quotedOngkir) || 0);
+  const safeSellerAbsorbed = Math.max(0, Number(sellerAbsorbedOngkir) || 0);
+  const safeDiscount = Math.max(0, Number(discount) || 0);
+  const safeOtherFees = Math.max(0, Number(otherFees) || 0);
+
+  // Total payable by buyer
+  const totalPayable = Math.max(0, subtotal + safeBuyerOngkir + safeOtherFees - safeDiscount);
+
+  // Gross profit = Sales Subtotal - Total COGS / Supplier Settlement
+  const estimatedGrossProfit = subtotal - totalCOGS;
+
+  // Net reseller profit = Gross profit - seller absorbed shipping - discounts + (buyer shipping profit/loss)
+  // Realized shipping burden: if quotedOngkir was higher than buyerOngkir, reseller pays difference
+  const shippingDifference = safeBuyerOngkir - safeQuotedOngkir - safeSellerAbsorbed;
+  const estimatedNetProfit = estimatedGrossProfit + shippingDifference - safeDiscount + safeOtherFees;
+
+  // Profit Margin Percentage relative to total sales
+  const profitMarginPercent = totalPayable > 0 
+    ? Math.round((estimatedNetProfit / totalPayable) * 1000) / 10 
+    : 0;
+
+  // Loss safeguard evaluation (strictly above configured threshold or negative/zero margin)
+  let hasLossWarning = false;
+  let lossWarningReason = '';
+
+  if (estimatedNetProfit < -maxLossWarningThreshold) {
+    hasLossWarning = true;
+    lossWarningReason = `Loss Alert: Order produces a loss of Rp ${Math.abs(estimatedNetProfit).toLocaleString('id-ID')}, which exceeds your configured loss threshold of Rp ${maxLossWarningThreshold.toLocaleString('id-ID')}. Human confirmation and audit trail required.`;
+  } else if (subtotal > 0 && estimatedNetProfit <= 0) {
+    hasLossWarning = true;
+    lossWarningReason = `Loss Alert: Order produces a negative or zero profit (Net Profit: Rp ${estimatedNetProfit.toLocaleString('id-ID')}). Selling price is at or below supplier settlement or shipping subsidy is too high.`;
+  } else if (subtotal > 0 && profitMarginPercent < minProfitMarginThreshold) {
+    hasLossWarning = true;
+    lossWarningReason = `Thin Margin Warning: Order profit margin (${profitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
+  }
+
+  return {
+    subtotal,
+    totalCOGS,
+    buyerOngkir: safeBuyerOngkir,
+    sellerAbsorbedOngkir: safeSellerAbsorbed,
+    discount: safeDiscount,
+    otherFees: safeOtherFees,
+    totalPayable,
+    estimatedGrossProfit,
+    estimatedNetProfit,
+    profitMarginPercent,
+    hasLossWarning,
+    lossWarningReason,
+  };
+}
+
+/**
+ * Deterministic Payment State Machine
+ * Enforces business constraints strictly:
+ * - Direct COD requires physical cash receipt confirmation (cannot auto-verify from chat).
+ * - Transfer requires receipt or manual verification.
+ */
+export function determinePaymentStatus(
+  method: PaymentMethod,
+  isExplicitlyVerified: boolean,
+  hasPhysicalCashReceived: boolean,
+  currentStatus?: PaymentStatus
+): { status: PaymentStatus; reason: string } {
+  if (currentStatus === 'CANCELLED') {
+    return { status: 'CANCELLED', reason: 'Order has been cancelled' };
+  }
+  if (currentStatus === 'REFUNDED') {
+    return { status: 'REFUNDED', reason: 'Order has been refunded' };
+  }
+
+  if (method === 'DIRECT_COD') {
+    if (hasPhysicalCashReceived) {
+      return { status: 'VERIFIED', reason: 'Physical cash collected and verified upon direct delivery' };
+    }
+    return { 
+      status: 'COD_PENDING', 
+      reason: 'Direct COD delivery scheduled. Payment must be physically verified upon handover.' 
+    };
+  }
+
+  if (method === 'COD') {
+    if (isExplicitlyVerified) {
+      return { status: 'VERIFIED', reason: 'Expedition COD disbursement verified from courier reconciliation' };
+    }
+    return { status: 'COD_PENDING', reason: 'Payment to be collected by expedition courier upon delivery' };
+  }
+
+  // Transfer / QRIS / CASH
+  if (isExplicitlyVerified) {
+    return { status: 'VERIFIED', reason: 'Payment verified with bank/transfer evidence' };
+  }
+
+  return { status: 'NEEDS_PROOF', reason: 'Payment proof is pending or awaiting bank mutation check' };
+}
+
+/**
+ * Match raw extracted items with reseller's authoritative product catalog
+ * Supports piece equivalent calculation and bulk threshold pricing.
+ */
+export function matchItemsWithCatalog(
+  candidateItems: CandidateExtraction['items'],
+  catalog: CatalogProduct[],
+  bulkDiscountThreshold: number = 20
+): OrderItem[] {
+  // Pre-pass: Match items to products to determine total piece volume in this order
+  const matchedPairs: { item: CandidateExtraction['items'][0]; product?: CatalogProduct; qty: number }[] = [];
+  let totalOrderPieces = 0;
+
+  for (const item of candidateItems) {
+    const matchedProduct = normalizeProduct(
+      item.productName || item.rawText || '',
+      item.matchedSku,
+      catalog
+    );
+
+    const qty = Math.max(1, Number(item.quantity) || 1);
+    const pieceEquivalent = matchedProduct ? (matchedProduct.pieceEquivalent || 1) : 1;
+    totalOrderPieces += qty * pieceEquivalent;
+
+    matchedPairs.push({ item, product: matchedProduct, qty });
+  }
+
+  const isBulkEligible = totalOrderPieces >= bulkDiscountThreshold;
+  const result: OrderItem[] = [];
+
+  for (const { item, product, qty } of matchedPairs) {
+    if (product) {
+      // Calculate unit selling price (regular or bulk)
+      let unitPrice = product.sellPrice;
+      if (isBulkEligible && product.bulkPrice) {
+        unitPrice = product.bulkPrice;
+      }
+      if (item.suggestedUnitPrice !== undefined && item.suggestedUnitPrice > 0 && item.suggestedUnitPrice !== product.sellPrice && item.suggestedUnitPrice !== product.bulkPrice) {
+        unitPrice = item.suggestedUnitPrice;
+      }
+
+      const baseCost = product.baseCost;
+      result.push({
+        productId: product.id,
+        sku: product.sku,
+        name: product.name,
+        quantity: qty,
+        unitPrice,
+        baseCost,
+        totalPrice: qty * unitPrice,
+        totalCost: qty * baseCost,
+      });
+    } else {
+      // Unmatched fallback item
+      const unitPrice = item.suggestedUnitPrice ?? 0;
+      const baseCost = item.suggestedUnitCost ?? 0;
+      result.push({
+        sku: item.matchedSku || `CUSTOM-${Date.now().toString().slice(-4)}`,
+        name: item.productName || item.rawText || 'Custom Item',
+        quantity: qty,
+        unitPrice,
+        baseCost,
+        totalPrice: qty * unitPrice,
+        totalCost: qty * baseCost,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Deterministic Validation & Exception Evaluation
+ * Determines if automation can proceed or if confirmation is needed
+ */
+export function evaluateOrderExceptions(
+  candidate: CandidateExtraction,
+  items: OrderItem[],
+  financials: FinancialBreakdown,
+  settings: ResellerSettings
+): {
+  needsConfirmation: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+
+  // 1. Check for ambiguous items or zero prices
+  if (items.length === 0) {
+    reasons.push('No valid products detected from the message.');
+  }
+
+  for (const item of items) {
+    if (item.unitPrice <= 0) {
+      reasons.push(`Unit price for "${item.name}" is Rp 0 or unassigned.`);
+    }
+  }
+
+  // 2. Missing recipient address for physical shipment (only if non-pickup)
+  const isDirectPickup = candidate.courierName?.toLowerCase().includes('pickup') || 
+                         candidate.courierName?.toLowerCase().includes('ambil') ||
+                         candidate.paymentMethod === 'TRANSFER' && (!candidate.recipientAddress || candidate.recipientAddress.trim().length === 0);
+  if (!isDirectPickup && (!candidate.recipientAddress || candidate.recipientAddress.trim().length < 5)) {
+    reasons.push('Recipient shipping address is missing or incomplete.');
+  }
+
+  // 3. Buyer vs Payer mismatch alert (needs notice so seller knows who sent the transfer)
+  if (candidate.isPayerDifferentFromBuyer && candidate.payerName) {
+    reasons.push(`Payer name ("${candidate.payerName}") is different from Buyer ("${candidate.buyerName || 'Buyer'}"). Verify sender mutation.`);
+  }
+
+  // 4. Direct COD safeguard rule
+  if (candidate.paymentMethod === 'DIRECT_COD') {
+    reasons.push('Direct COD delivery selected: Payment requires physical verification upon handover and cannot be auto-cleared.');
+  }
+
+  // 5. Financial loss or thin margin alert
+  if (financials.hasLossWarning && financials.lossWarningReason) {
+    reasons.push(financials.lossWarningReason);
+  }
+
+  // 6. Explicit ambiguity flags from extraction (filter out false 'not in catalog' if item matched)
+  if (candidate.ambiguities && candidate.ambiguities.length > 0) {
+    const hasUnmatchedCustomItems = items.some(it => !it.productId || it.sku.startsWith('CUSTOM'));
+    for (const amb of candidate.ambiguities) {
+      const isCatalogWarning = amb.toLowerCase().includes('not in catalog') || amb.toLowerCase().includes('custom item');
+      if (isCatalogWarning && !hasUnmatchedCustomItems) {
+        // Skip false catalog warning since all items matched valid catalog products
+        continue;
+      }
+      if (!reasons.includes(amb)) {
+        reasons.push(amb);
+      }
+    }
+  }
+
+  // Automation by default: If confidence is high and no blocking reasons exist
+  const hasCriticalBlocker = reasons.some(r => 
+    r.includes('missing or incomplete') || 
+    r.includes('No valid products') || 
+    r.includes('Unit price for') ||
+    r.includes('Loss Alert')
+  );
+
+  const needsConfirmation = hasCriticalBlocker || (candidate.confidence < 0.85 && reasons.length > 0);
+
+  return {
+    needsConfirmation,
+    reasons,
+  };
+}
+
+/**
+ * Build a Complete Reseller Order object from candidate and deterministic rules
+ */
+export function buildOrderFromCandidate(
+  candidate: CandidateExtraction,
+  catalog: CatalogProduct[],
+  settings: ResellerSettings,
+  userId: string,
+  existingOrderNumber?: string
+): ResellerOrder {
+  const bulkThreshold = settings.safeguards?.bulkDiscountThreshold ?? 20;
+  const matchedItems = matchItemsWithCatalog(candidate.items, catalog, bulkThreshold);
+  const buyerOngkir = candidate.buyerOngkir ?? (candidate.quotedOngkir ?? 0);
+  const quotedOngkir = candidate.quotedOngkir ?? buyerOngkir;
+  const sellerAbsorbedOngkir = candidate.sellerAbsorbedOngkir ?? 0;
+
+  const financials = calculateOrderFinancials(
+    matchedItems,
+    buyerOngkir,
+    quotedOngkir,
+    sellerAbsorbedOngkir,
+    0, // discount
+    0, // other fees
+    settings.safeguards?.minProfitMarginPercent ?? 15,
+    settings.safeguards?.maxLossWarningThreshold ?? 50000
+  );
+
+  const exceptions = evaluateOrderExceptions(candidate, matchedItems, financials, settings);
+
+  const method: PaymentMethod = candidate.paymentMethod || 'TRANSFER';
+  const paymentEvaluation = determinePaymentStatus(
+    method,
+    false, // initially unverified unless explicit
+    false  // no physical cash yet
+  );
+
+  const now = new Date().toISOString();
+  const orderNum = existingOrderNumber || `SGB-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(100 + Math.random() * 900)}`;
+
+  const auditEntry: AuditEntry = {
+    id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: now,
+    action: 'CREATE_ORDER_AI',
+    actor: 'AI_AGENT',
+    description: `Order ${orderNum} drafted from user chat/evidence. Deterministic financials calculated.`,
+    newState: `Status: ${exceptions.needsConfirmation ? 'PENDING_CONFIRMATION' : 'READY_TO_PACK'}, Payment: ${paymentEvaluation.status}`,
+    reason: exceptions.needsConfirmation ? exceptions.reasons.join('; ') : 'High confidence automated parsing',
+  };
+
+  const initialShippingStatus: ShippingStatus = exceptions.needsConfirmation 
+    ? 'PENDING_CONFIRMATION' 
+    : 'READY_TO_PACK';
+
+  return {
+    id: `ord_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    userId,
+    orderNumber: orderNum,
+    createdAt: now,
+    updatedAt: now,
+    buyer: {
+      name: candidate.buyerName || 'Pelanggan Reseller',
+      phone: candidate.buyerPhone || '',
+    },
+    payer: {
+      name: candidate.payerName || candidate.buyerName || 'Pelanggan Reseller',
+      bankName: candidate.payerBank || '',
+      accountNumber: candidate.payerAccount || '',
+      transferReference: candidate.transferReference || '',
+    },
+    recipient: {
+      name: candidate.recipientName || candidate.buyerName || 'Pelanggan Reseller',
+      phone: candidate.recipientPhone || candidate.buyerPhone || '',
+      address: candidate.recipientAddress || '',
+      city: candidate.recipientCity || '',
+    },
+    items: matchedItems,
+    financials,
+    paymentMethod: method,
+    paymentStatus: paymentEvaluation.status,
+    paymentProofNotes: candidate.paymentProofClaimed ? 'Customer claimed payment transfer' : '',
+    shipping: {
+      courierName: candidate.courierName || settings.defaultCouriers[0] || 'J&T Express',
+      quotedOngkir,
+      buyerOngkir,
+      sellerAbsorbedOngkir,
+    },
+    shippingStatus: initialShippingStatus,
+    needsConfirmation: exceptions.needsConfirmation,
+    confirmationReasons: exceptions.reasons,
+    aiExtractionConfidence: candidate.confidence,
+    auditTrail: [auditEntry],
+    customerNotes: candidate.customerNotes || '',
+    internalNotes: '',
+    isClosedInTutupBuku: false,
+  };
+}
+
+/**
+ * Deterministic Tutup Buku (Daily Book Closing) Calculator
+ */
+export function calculateTutupBukuMetrics(
+  orders: ResellerOrder[],
+  dateStr: string,
+  userId: string,
+  closedBy: string = 'Reseller Admin'
+): DailyCloseRecord {
+  let totalGrossRevenue = 0;
+  let totalCOGS = 0;
+  let totalNetProfit = 0;
+
+  let collectedTransferAmount = 0;
+  let collectedCashAmount = 0;
+  let pendingCodAmount = 0;
+
+  let completedOrdersCount = 0;
+  let pendingProofOrdersCount = 0;
+  let unsettledCodOrdersCount = 0;
+
+  const discrepancies: string[] = [];
+  const orderIds: string[] = [];
+
+  for (const order of orders) {
+    if (order.shippingStatus === 'CANCELLED') continue;
+
+    orderIds.push(order.id);
+    totalGrossRevenue += order.financials.totalPayable;
+    totalCOGS += order.financials.totalCOGS;
+    totalNetProfit += order.financials.estimatedNetProfit;
+
+    // Check payment completion
+    if (order.paymentStatus === 'VERIFIED') {
+      completedOrdersCount++;
+      if (order.paymentMethod === 'TRANSFER' || order.paymentMethod === 'QRIS') {
+        collectedTransferAmount += order.financials.totalPayable;
+      } else {
+        collectedCashAmount += order.financials.totalPayable;
+      }
+    } else if (order.paymentStatus === 'NEEDS_PROOF') {
+      pendingProofOrdersCount++;
+      discrepancies.push(`Order ${order.orderNumber} (${order.buyer.name}): Payment Rp ${order.financials.totalPayable.toLocaleString('id-ID')} is still unverified.`);
+    } else if (order.paymentStatus === 'COD_PENDING') {
+      unsettledCodOrdersCount++;
+      pendingCodAmount += order.financials.totalPayable;
+      discrepancies.push(`Order ${order.orderNumber} (${order.recipient.name}): COD Rp ${order.financials.totalPayable.toLocaleString('id-ID')} via ${order.shipping.courierName} is pending collection/disbursement.`);
+    }
+
+    if (order.financials.hasLossWarning) {
+      discrepancies.push(`Warning on ${order.orderNumber}: Profit is below safeguard (Rp ${order.financials.estimatedNetProfit.toLocaleString('id-ID')}).`);
+    }
+  }
+
+  const now = new Date().toISOString();
+
+  return {
+    id: `tb_${dateStr.replace(/-/g, '')}_${Date.now().toString().slice(-4)}`,
+    userId,
+    date: dateStr,
+    closedAt: now,
+    closedBy,
+    totalOrdersCount: orderIds.length,
+    completedOrdersCount,
+    pendingProofOrdersCount,
+    unsettledCodOrdersCount,
+    totalGrossRevenue,
+    totalCOGS,
+    totalNetProfit,
+    collectedTransferAmount,
+    collectedCashAmount,
+    pendingCodAmount,
+    orderIds,
+    discrepancies,
+    notes: discrepancies.length === 0 
+      ? 'All transactions balanced and verified.' 
+      : `${discrepancies.length} item(s) need follow-up.`,
+  };
+}
+
+/**
+ * Generate Buyer WhatsApp / SMS Text Invoice
+ */
+export function generateBuyerInvoiceText(
+  order: ResellerOrder,
+  settings: ResellerSettings
+): string {
+  const itemsText = order.items
+    .map(i => `• ${i.name} (${i.quantity}x) = Rp ${(i.totalPrice).toLocaleString('id-ID')}`)
+    .join('\n');
+
+  const bankInfo = settings.bankAccounts.length > 0 
+    ? settings.bankAccounts.map(b => `💳 ${b.bankName}: ${b.accountNumber} a.n ${b.accountHolder}`).join('\n')
+    : '💳 Transfer Bank';
+
+  return `📦 *INVOICE PESANAN - ${settings.storeName.toUpperCase()}*
+No. Pesanan: *${order.orderNumber}*
+Tanggal: ${new Date(order.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}
+
+👤 *Penerima:* ${order.recipient.name}
+📞 *No. HP:* ${order.recipient.phone || '-'}
+📍 *Alamat:* ${order.recipient.address || '-'} ${order.recipient.city ? `(${order.recipient.city})` : ''}
+
+🛒 *Rincian Pesanan:*
+${itemsText}
+
+----------------------------------
+Subtotal: Rp ${order.financials.subtotal.toLocaleString('id-ID')}
+Ongkir (${order.shipping.courierName}): Rp ${order.financials.buyerOngkir.toLocaleString('id-ID')}
+${order.financials.discount > 0 ? `Diskon: -Rp ${order.financials.discount.toLocaleString('id-ID')}\n` : ''}*TOTAL TAGIHAN: Rp ${order.financials.totalPayable.toLocaleString('id-ID')}*
+----------------------------------
+Metode Pembayaran: *${order.paymentMethod === 'DIRECT_COD' ? 'Direct COD (Bayar di Tempat)' : order.paymentMethod === 'COD' ? 'COD Kurir' : 'Transfer Bank'}*
+Status Pembayaran: *${order.paymentStatus === 'VERIFIED' ? '✅ LUNAS / VERIFIED' : '⏳ MENUNGGU BUKTI TRANSFER'}*
+
+${order.paymentMethod === 'TRANSFER' || order.paymentMethod === 'QRIS' ? `Silakan transfer ke rekening resmi:\n${bankInfo}\n\nKirim bukti transfer ke chat ini ya kak. Terima kasih! 🙏` : 'Mohon siapkan uang pas saat pesanan diantar. Terima kasih! 🙏'}`;
+}
+
+/**
+ * Generate Admin Order Card & Packing Summary
+ */
+export function generateAdminOrderCard(order: ResellerOrder): {
+  packingList: { name: string; sku: string; qty: number }[];
+  courierLabel: string;
+  financialMetrics: {
+    grossMarginPercent: number;
+    netProfit: number;
+    cogs: number;
+  };
+} {
+  return {
+    packingList: order.items.map(i => ({ name: i.name, sku: i.sku, qty: i.quantity })),
+    courierLabel: `[${order.shipping.courierName.toUpperCase()}] TO: ${order.recipient.name} | ${order.recipient.phone} | ${order.recipient.address}, ${order.recipient.city || ''}`,
+    financialMetrics: {
+      grossMarginPercent: order.financials.profitMarginPercent,
+      netProfit: order.financials.estimatedNetProfit,
+      cogs: order.financials.totalCOGS,
+    },
+  };
+}

@@ -1,0 +1,148 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile document",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "ResellerOrder": {
+      "title": "ResellerOrder",
+      "description": "Indonesian reseller order with distinct buyer, payer, recipient, and deterministic financials",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "buyer": { "type": "object" },
+        "payer": { "type": "object" },
+        "recipient": { "type": "object" },
+        "items": { "type": "array" },
+        "financials": { "type": "object" },
+        "shipping": { "type": "object" },
+        "paymentMethod": { "type": "string" },
+        "paymentStatus": { "type": "string" },
+        "shippingStatus": { "type": "string" },
+        "auditTrail": { "type": "array" }
+      },
+      "required": ["id", "orderNumber", "createdAt", "buyer", "recipient", "items", "financials", "paymentStatus"]
+    },
+    "CatalogProduct": {
+      "title": "CatalogProduct",
+      "description": "Product in reseller inventory catalog with COGS modal and selling price",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sku": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "sellPrice": { "type": "number" },
+        "baseCost": { "type": "number" },
+        "stock": { "type": "number" },
+        "unit": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["id", "sku", "name", "sellPrice", "baseCost"]
+    },
+    "ResellerSettings": {
+      "title": "ResellerSettings",
+      "description": "Store configuration, bank accounts, and deterministic financial safeguards",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "storeName": { "type": "string" },
+        "storePhone": { "type": "string" },
+        "storeCity": { "type": "string" },
+        "bankAccounts": { "type": "array" },
+        "safeguards": { "type": "object" }
+      },
+      "required": ["storeName", "bankAccounts", "safeguards"]
+    },
+    "DailyCloseRecord": {
+      "title": "DailyCloseRecord",
+      "description": "Deterministic daily financial reconciliation snapshot (Tutup Buku)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "closedAt": { "type": "string" },
+        "closedByUserId": { "type": "string" },
+        "storeName": { "type": "string" },
+        "totalOrdersCount": { "type": "number" },
+        "completedOrdersCount": { "type": "number" },
+        "pendingProofOrdersCount": { "type": "number" },
+        "unsettledCodOrdersCount": { "type": "number" },
+        "totalGrossRevenue": { "type": "number" },
+        "totalCOGS": { "type": "number" },
+        "totalNetProfit": { "type": "number" },
+        "collectedTransferAmount": { "type": "number" },
+        "collectedCashAmount": { "type": "number" },
+        "pendingCodAmount": { "type": "number" },
+        "discrepancies": { "type": "array" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "date", "closedAt", "totalGrossRevenue", "totalCOGS", "totalNetProfit"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Audit trail log entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "action": { "type": "string" },
+        "actor": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "action", "actor", "description"]
+    },
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "AI Operations Desk chat session messages",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "messages": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "messages"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Root user profile document"
+    },
+    "/users/{userId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/ResellerOrder" },
+      "description": "Reseller customer orders subcollection"
+    },
+    "/users/{userId}/catalog/{productId}": {
+      "schema": { "$ref": "#/entities/CatalogProduct" },
+      "description": "Reseller product catalog subcollection"
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/ResellerSettings" },
+      "description": "Reseller store configurations and loss safeguards"
+    },
+    "/users/{userId}/daily_closes/{closeId}": {
+      "schema": { "$ref": "#/entities/DailyCloseRecord" },
+      "description": "Persisted daily Tutup Buku reconciliation records"
+    },
+    "/users/{userId}/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Chronological audit records"
+    },
+    "/users/{userId}/chat_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ChatSession" },
+      "description": "Persisted multi-turn operations desk messages"
+    }
+  }
+}
