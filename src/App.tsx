@@ -190,17 +190,23 @@ export default function App() {
       const rawText = await response.text();
       safeResponseBodyPreview = rawText.slice(0, 300);
 
+      if (!response.ok) {
+        requestStage = 'server_returned_error_status';
+        throw new Error(`Temporary service issue (HTTP ${response.status}). Nothing was saved. Please try again.`);
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.toLowerCase().includes('application/json')) {
+        requestStage = 'unexpected_response_content_type';
+        throw new Error('Temporary service issue: the service returned an unexpected response. Nothing was saved. Please try again.');
+      }
+
       requestStage = 'parsing_json_body';
       let data: any = {};
       try {
         data = rawText ? JSON.parse(rawText) : {};
       } catch (parseErr: any) {
-        throw new Error(`JSON parse error (${parseErr.message}) on response: ${safeResponseBodyPreview}`);
-      }
-
-      if (!response.ok && !data.candidate) {
-        requestStage = 'server_returned_error_status';
-        throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
+        throw new Error('Temporary service issue: the response could not be read safely. Nothing was saved. Please try again.');
       }
 
       requestStage = 'processing_candidate_success';
