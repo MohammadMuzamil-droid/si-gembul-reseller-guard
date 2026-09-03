@@ -103,6 +103,60 @@ function getLatestTransactionCandidate(conversationHistory: any[]): any | undefi
   )?.candidate;
 }
 
+function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) {
+  const parsedItems = (candidate.items || []).map((item: any) => {
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const catalogProduct = catalog.find(product => product.sku === item.matchedSku);
+    const pieceEquivalent = Math.max(1, Number(catalogProduct?.pieceEquivalent) || (item.matchedSku?.endsWith('-1KG') ? 4 : 1));
+    const isWeightBased = pieceEquivalent > 1 || item.matchedSku?.endsWith('-1KG');
+
+    return {
+      catalogProduct,
+      sku: item.matchedSku,
+      productName: item.productName,
+      rawText: item.rawText,
+      originalQuantity: quantity,
+      originalUnit: isWeightBased ? 'kg' : 'pcs',
+      pieceEquivalent,
+      normalizedPieces: quantity * pieceEquivalent,
+    };
+  });
+  const isBulkEligible = parsedItems.reduce((total: number, item: any) => total + item.normalizedPieces, 0) >= 20;
+  const items = parsedItems.map((item: any, index: number) => {
+    const sourceItem = candidate.items[index];
+    const suggestedUnitPrice = Math.max(0, Number(sourceItem.suggestedUnitPrice) || 0);
+    let unitPrice = item.catalogProduct?.sellPrice ?? suggestedUnitPrice;
+    if (isBulkEligible && item.catalogProduct?.bulkPrice) {
+      unitPrice = item.catalogProduct.bulkPrice;
+    }
+    if (suggestedUnitPrice > 0 && suggestedUnitPrice !== item.catalogProduct?.sellPrice && suggestedUnitPrice !== item.catalogProduct?.bulkPrice) {
+      unitPrice = suggestedUnitPrice;
+    }
+    const unitCost = item.catalogProduct?.baseCost ?? Math.max(0, Number(sourceItem.suggestedUnitCost) || 0);
+    const { catalogProduct, ...contextItem } = item;
+    return {
+      ...contextItem,
+      unitPrice,
+      unitCost,
+      sales: item.originalQuantity * unitPrice,
+      cogs: item.originalQuantity * unitCost,
+    };
+  });
+  const sales = items.reduce((total: number, item: any) => total + item.sales, 0);
+  const cogs = items.reduce((total: number, item: any) => total + item.cogs, 0);
+  const profit = sales - cogs;
+
+  return {
+    items,
+    financials: {
+      sales,
+      cogs,
+      profit,
+      marginPercent: sales > 0 ? Math.round((profit / sales) * 1000) / 10 : 0,
+    },
+  };
+}
+
 function isContextualUpdate(message: string, conversationHistory: any[]): boolean {
   return !!getLatestTransactionCandidate(conversationHistory) &&
     /\b(change|update|revise|modify|ubah|ganti|sekarang|now)\b/i.test(message);
@@ -128,7 +182,7 @@ function retainTransactionContext(updatedCandidate: any, previousCandidate: any)
   };
 }
 
-function buildFallbackConversationReply(message: string, conversationHistory: any[]) {
+function buildFallbackConversationReply(message: string, conversationHistory: any[], catalog: any[] = []) {
   const latestCandidate = getLatestTransactionCandidate(conversationHistory);
   if (!latestCandidate) {
     return {
@@ -137,22 +191,14 @@ function buildFallbackConversationReply(message: string, conversationHistory: an
     };
   }
 
-  const items = latestCandidate.items as any[];
-  const itemSummary = items.map(item => {
-    const quantity = Math.max(1, Number(item.quantity) || 1);
-    const pieceEquivalent = item.matchedSku?.endsWith('-1KG') ? 4 : 1;
-    const normalizedPieces = quantity * pieceEquivalent;
-    const unitLabel = pieceEquivalent > 1 ? 'kg' : 'pcs';
-    return `${quantity} ${unitLabel} ${item.productName} (${normalizedPieces} pcs equivalent)`;
+  const context = buildStructuredTransactionContext(latestCandidate, catalog);
+  const itemSummary = context.items.map((item: any) => {
+    return `${item.originalQuantity} ${item.originalUnit} ${item.productName} (${item.normalizedPieces} pcs equivalent)`;
   }).join(', ');
-  const sales = items.reduce((total, item) => total + Math.max(1, Number(item.quantity) || 1) * Math.max(0, Number(item.suggestedUnitPrice) || 0), 0);
-  const cogs = items.reduce((total, item) => total + Math.max(1, Number(item.quantity) || 1) * Math.max(0, Number(item.suggestedUnitCost) || 0), 0);
-  const profit = sales - cogs;
-  const margin = sales > 0 ? Math.round((profit / sales) * 1000) / 10 : 0;
 
   return {
     responseMode: 'CONVERSATION',
-    explanation: `The most recent transaction was ${itemSummary}. Sales: Rp ${sales.toLocaleString('id-ID')}; COGS: Rp ${cogs.toLocaleString('id-ID')}; Profit: Rp ${profit.toLocaleString('id-ID')} (Margin: ${margin}%).`,
+    explanation: `The most recent transaction was ${itemSummary}. Sales: Rp ${context.financials.sales.toLocaleString('id-ID')}; COGS: Rp ${context.financials.cogs.toLocaleString('id-ID')}; Profit: Rp ${context.financials.profit.toLocaleString('id-ID')} (Margin: ${context.financials.marginPercent}%).`,
   };
 }
 
@@ -224,6 +270,7 @@ Your mission:
     - In 'explanation', summarize clearly what you detected ("Here's what I found...") and if any detail is needed ("I need one detail: ...").
 8. Distinguish a new or updated transaction from a conversational follow-up:
     - For a question about prior chat context, return responseMode: "CONVERSATION", items: [], and answer from the supplied prior structured transaction context. Do not invent an empty order candidate.
+    - Structured transaction context includes originalQuantity/originalUnit and normalizedPieces. Treat normalizedPieces and financials as authoritative catalog-derived values; do not re-derive or conflate them from natural-language phrasing.
     - For a change to a prior transaction, return responseMode: "TRANSACTION" with the complete replacement candidate reflecting the latest requested state.
     - For a clearly new transaction, return responseMode: "TRANSACTION" and do not merge it with an earlier order.
 
@@ -240,9 +287,10 @@ Store Context:
     if (!ai) {
       console.log('No Gemini API key available, using deterministic parser fallback.');
       if (isConversationalQuestion(message || '')) {
-        const contextualReply = buildFallbackConversationReply(message || '', conversationHistory);
+        const contextualReply = buildFallbackConversationReply(message || '', conversationHistory, catalog);
         res.json({
           ...contextualReply,
+          provider: 'fallback',
           isAIPowered: false,
           notice: 'Using bounded deterministic conversation context; Gemini reasoning is unavailable.',
         });
@@ -256,6 +304,7 @@ Store Context:
         candidate,
         responseMode: 'TRANSACTION',
         explanation: candidate.explanation,
+        provider: 'fallback',
         isAIPowered: false,
         notice: 'Using deterministic parser (Set GEMINI_API_KEY for full AI multi-modal reasoning)',
       });
@@ -275,7 +324,7 @@ Store Context:
           });
         } else if (turn.role === 'assistant' && turn.content) {
           const candidateContext = Array.isArray(turn.candidate?.items) && turn.candidate.items.length > 0
-            ? `\nStructured transaction context: ${JSON.stringify(turn.candidate)}`
+            ? `\nStructured transaction context: ${JSON.stringify(buildStructuredTransactionContext(turn.candidate, catalog))}`
             : '';
           contents.push({
             role: 'model',
@@ -320,11 +369,13 @@ Store Context:
 
     const responseText = response.text || '{}';
     let candidateData: any;
+    let provider = 'gemini';
     try {
       candidateData = JSON.parse(responseText);
     } catch (parseErr) {
       console.error('Failed to parse Gemini JSON response:', responseText);
-      candidateData = fallbackDeterministicParser(message, catalog);
+      candidateData = { ...fallbackDeterministicParser(message, catalog), responseMode: 'TRANSACTION' };
+      provider = 'fallback';
     }
 
     const isConversation = candidateData.responseMode === 'CONVERSATION';
@@ -332,7 +383,8 @@ Store Context:
       candidate: isConversation ? undefined : candidateData,
       responseMode: candidateData.responseMode,
       explanation: candidateData.explanation,
-      isAIPowered: true,
+      provider,
+      isAIPowered: provider === 'gemini',
       rawExplanation: candidateData.explanation,
     });
   } catch (error: any) {
@@ -340,6 +392,7 @@ Store Context:
     res.status(500).json({
       error: error.message || 'Failed to process agent interpretation',
       candidate: fallbackDeterministicParser(req.body.message || '', req.body.catalog || []),
+      provider: 'fallback',
     });
   }
 });
