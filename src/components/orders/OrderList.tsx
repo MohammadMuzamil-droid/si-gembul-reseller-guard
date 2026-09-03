@@ -151,7 +151,7 @@ export const OrderList: React.FC<OrderListProps> = ({
         {/* Status Tabs */}
         <div className="flex gap-1.5 overflow-x-auto pb-1">
           {[
-            { id: 'ALL', label: 'All Active Orders', count: orders.length },
+            { id: 'ALL', label: 'All Orders', count: orders.length },
             { id: 'VERIFIED', label: 'Payment Verified', count: verifiedCount },
             { id: 'NEEDS_PROOF', label: 'Needs Proof', count: needsProofCount },
             { id: 'COD', label: 'COD & Direct COD', count: orders.filter(o => o.paymentMethod === 'COD' || o.paymentMethod === 'DIRECT_COD').length },
@@ -204,11 +204,13 @@ export const OrderList: React.FC<OrderListProps> = ({
                     
                     {/* Payment Badge */}
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      (order.paymentStatus === 'CANCELLED' || order.shippingStatus === 'CANCELLED') ? 'bg-slate-200 text-slate-700' :
                       order.paymentStatus === 'VERIFIED' ? 'bg-emerald-100 text-emerald-800' :
                       order.paymentStatus === 'COD_PENDING' ? 'bg-amber-100 text-amber-800' :
                       'bg-rose-100 text-rose-800'
                     }`}>
-                      {order.paymentStatus === 'VERIFIED' ? 'Payment verified' :
+                      {(order.paymentStatus === 'CANCELLED' || order.shippingStatus === 'CANCELLED') ? 'DIBATALKAN' :
+                       order.paymentStatus === 'VERIFIED' ? 'Payment verified' :
                        order.paymentStatus === 'COD_PENDING' ? 'COD Pending' :
                        'Payment still needs proof'}
                     </span>
@@ -256,12 +258,14 @@ export const OrderList: React.FC<OrderListProps> = ({
 
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${
+                      order.shippingStatus === 'CANCELLED' ? 'bg-slate-200 text-slate-700' :
                       order.shippingStatus === 'SHIPPED' ? 'bg-sky-100 text-sky-800' :
                       order.shippingStatus === 'DELIVERED' ? 'bg-emerald-100 text-emerald-800' :
                       order.shippingStatus === 'READY_TO_PACK' ? 'bg-indigo-100 text-indigo-800' :
                       'bg-slate-100 text-slate-700'
                     }`}>
-                      {order.shippingStatus === 'SHIPPED' ? 'Shipping and ongkir' :
+                      {order.shippingStatus === 'CANCELLED' ? 'DIBATALKAN' :
+                       order.shippingStatus === 'SHIPPED' ? 'Shipping and ongkir' :
                        order.shippingStatus === 'DELIVERED' ? 'Delivered' :
                        order.shippingStatus === 'READY_TO_PACK' ? 'Ready to Pack' :
                        'Draft'}

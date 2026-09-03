@@ -44,11 +44,9 @@ export const TutupBukuView: React.FC<TutupBukuViewProps> = ({
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [lastClosedRecord, setLastClosedRecord] = useState<DailyCloseRecord | null>(null);
 
-  // Filter orders for the selected date
-  const dateOrders = orders.filter((o) => o.createdAt.startsWith(selectedDate));
-
-  // Deterministically compute Tutup Buku metrics
-  const currentMetrics = calculateTutupBukuMetrics(dateOrders, selectedDate, userId, settings.storeName);
+  // Closing membership is state-based. The selected date identifies this closing record,
+  // not the creation date of orders eligible to be reconciled.
+  const currentMetrics = calculateTutupBukuMetrics(orders, selectedDate, userId, settings.storeName);
 
   const handleExecuteTutupBuku = async () => {
     setIsSaving(true);
@@ -74,6 +72,8 @@ Tanggal: ${new Date(selectedDate).toLocaleDateString('id-ID', { weekday: 'long',
 • Pembayaran Terverifikasi (Lunas): ${currentMetrics.completedOrdersCount} pesanan
 • Pending Bukti Transfer: ${currentMetrics.pendingProofOrdersCount} pesanan
 • Pending COD Kurir: ${currentMetrics.unsettledCodOrdersCount} pesanan
+• Roll-forward: ${currentMetrics.rollForwardOrdersCount || 0} transaksi
+• Dibatalkan (excluded): ${currentMetrics.cancelledOrdersCount || 0} transaksi
 
 💰 *Keuangan & Margin Reseller:*
 • Total Omset Penjualan: Rp ${currentMetrics.totalGrossRevenue.toLocaleString('id-ID')}
@@ -112,12 +112,12 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Deterministic financial audit for daily revenue, modal, net profit, and COD collections
+              Closes currently eligible transactions; incomplete transactions roll forward automatically.
             </p>
           </div>
         </div>
 
-        {/* Date Selector */}
+        {/* This date is the reconciliation record date, never the membership authority. */}
         <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1.5 px-3">
           <Calendar className="w-4 h-4 text-slate-500" />
           <input
@@ -141,7 +141,7 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
               Rp {currentMetrics.totalGrossRevenue.toLocaleString('id-ID')}
             </span>
             <span className="block text-xs text-slate-500 mt-0.5">
-              From {currentMetrics.totalOrdersCount} orders on this date
+              From currently eligible active orders
             </span>
           </div>
         </div>
@@ -199,6 +199,24 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
         </div>
       </div>
 
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-xs">
+          <span className="font-bold text-emerald-900 block">Eligible to close</span>
+          <span className="text-2xl font-extrabold text-emerald-800">{currentMetrics.totalOrdersCount}</span>
+          <p className="text-emerald-800 mt-1">Verified payment plus required shipment state.</p>
+        </div>
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-xs">
+          <span className="font-bold text-amber-900 block">Roll forward</span>
+          <span className="text-2xl font-extrabold text-amber-800">{currentMetrics.rollForwardOrdersCount || 0}</span>
+          <p className="text-amber-800 mt-1">Incomplete payment or shipping stays active for a later closing.</p>
+        </div>
+        <div className="p-4 bg-slate-100 border border-slate-200 rounded-xl text-xs">
+          <span className="font-bold text-slate-800 block">Cancelled / DIBATALKAN</span>
+          <span className="text-2xl font-extrabold text-slate-700">{currentMetrics.cancelledOrdersCount || 0}</span>
+          <p className="text-slate-600 mt-1">Retained for audit and excluded from this closing.</p>
+        </div>
+      </div>
+
       {/* Discrepancy and Audit Checklist */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
         <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -210,7 +228,7 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
           <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3 text-emerald-900 text-xs">
             <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
             <div>
-              <span className="font-bold">Perfect Balance:</span> All orders for {selectedDate} have verified payments and matched logistics with zero detected financial leaks.
+              <span className="font-bold">Ready to close:</span> All currently active orders are eligible and reconciled.
             </div>
           </div>
         ) : (
@@ -253,7 +271,7 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
 
           <button
             onClick={handleExecuteTutupBuku}
-            disabled={isSaving || dateOrders.length === 0}
+            disabled={isSaving || currentMetrics.totalOrdersCount === 0}
             className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 active:bg-slate-950 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40"
           >
             {isSaving ? (

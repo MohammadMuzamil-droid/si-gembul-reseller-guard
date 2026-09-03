@@ -200,10 +200,10 @@ export function calculateOrderFinancials(
   // Gross profit = Sales Subtotal - Total COGS / Supplier Settlement
   const estimatedGrossProfit = subtotal - totalCOGS;
 
-  // Net reseller profit = Gross profit - seller absorbed shipping - discounts + (buyer shipping profit/loss)
-  // Realized shipping burden: if quotedOngkir was higher than buyerOngkir, reseller pays difference
-  const shippingDifference = safeBuyerOngkir - safeQuotedOngkir - safeSellerAbsorbed;
-  const estimatedNetProfit = estimatedGrossProfit + shippingDifference - safeDiscount + safeOtherFees;
+  // Shipping reimbursement is not product profit. Only the seller's unreimbursed
+  // shipping burden reduces product net profit; a buyer overpayment never inflates it.
+  const sellerShippingBurden = Math.max(0, safeQuotedOngkir - safeBuyerOngkir) + safeSellerAbsorbed;
+  const estimatedNetProfit = estimatedGrossProfit - sellerShippingBurden - safeDiscount + safeOtherFees;
 
   // Profit Margin Percentage relative to total sales
   const profitMarginPercent = totalPayable > 0 
@@ -229,6 +229,7 @@ export function calculateOrderFinancials(
     subtotal,
     totalCOGS,
     buyerOngkir: safeBuyerOngkir,
+    quotedOngkir: safeQuotedOngkir,
     sellerAbsorbedOngkir: safeSellerAbsorbed,
     discount: safeDiscount,
     otherFees: safeOtherFees,
@@ -283,6 +284,83 @@ export function determinePaymentStatus(
   }
 
   return { status: 'NEEDS_PROOF', reason: 'Payment proof is pending or awaiting bank mutation check' };
+}
+
+/** Backward-compatible payment summary. Legacy VERIFIED orders are treated as settled. */
+export function getVerifiedPaymentTotal(order: ResellerOrder): number {
+  if (order.payments && order.payments.length > 0) {
+    return order.payments
+      .filter(payment => payment.status === 'VERIFIED')
+      .reduce((total, payment) => total + Math.max(0, Number(payment.amount) || 0), 0);
+  }
+  return order.paymentStatus === 'VERIFIED' ? order.financials.totalPayable : 0;
+}
+
+export function getPaymentCompletion(order: ResellerOrder): {
+  finalAmountDue: number;
+  verifiedTotal: number;
+  outstandingAmount: number;
+  overpaymentAmount: number;
+  isComplete: boolean;
+} {
+  const finalAmountDue = Math.max(0, order.financials.totalPayable || 0);
+  const verifiedTotal = getVerifiedPaymentTotal(order);
+  return {
+    finalAmountDue,
+    verifiedTotal,
+    outstandingAmount: Math.max(0, finalAmountDue - verifiedTotal),
+    overpaymentAmount: Math.max(0, verifiedTotal - finalAmountDue),
+    isComplete: order.paymentStatus === 'VERIFIED' && verifiedTotal >= finalAmountDue,
+  };
+}
+
+/** Shipment and closing eligibility are deterministic and cannot be granted by AI text alone. */
+export function evaluateShipmentEligibility(order: ResellerOrder): {
+  canShip: boolean;
+  eligibleForClosing: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  if (order.paymentStatus === 'CANCELLED' || order.shippingStatus === 'CANCELLED') {
+    return { canShip: false, eligibleForClosing: false, reasons: ['Transaction is cancelled (DIBATALKAN).'] };
+  }
+
+  const payment = getPaymentCompletion(order);
+  if (!payment.isComplete) {
+    reasons.push(`Verified payment is incomplete: Rp ${payment.verifiedTotal.toLocaleString('id-ID')} of Rp ${payment.finalAmountDue.toLocaleString('id-ID')}.`);
+  }
+
+  if (order.paymentMethod === 'DIRECT_COD') {
+    if (order.shippingStatus !== 'DELIVERED') {
+      reasons.push('Direct COD must be physically handed over and cash-confirmed before closing.');
+    }
+    return {
+      // Direct COD is intentionally distinct: it may be dispatched for cash-on-handover,
+      // but it can never be closed until the cash payment is explicitly verified.
+      canShip: order.shippingStatus === 'READY_TO_PACK' || order.shippingStatus === 'SHIPPED' || order.shippingStatus === 'DELIVERED',
+      eligibleForClosing: payment.isComplete && order.shippingStatus === 'DELIVERED',
+      reasons,
+    };
+  }
+
+  const courier = (order.shipping.courierName || '').toLowerCase();
+  const isPickup = courier.includes('pickup') || courier.includes('ambil');
+  if (!isPickup && (order.recipient.address || '').trim().length < 5) {
+    reasons.push('Recipient shipping address is incomplete.');
+  }
+
+  const hasRequiredAddress = isPickup || (order.recipient.address || '').trim().length >= 5;
+  const canShip = payment.isComplete && hasRequiredAddress;
+  const shipmentRecorded = order.shippingStatus === 'SHIPPED' || order.shippingStatus === 'DELIVERED';
+  const hasRequiredEvidence = isPickup || !!order.shipping.trackingNumber?.trim();
+  if (!shipmentRecorded) reasons.push('Shipment has not been recorded as SHIPPED or DELIVERED.');
+  if (!hasRequiredEvidence) reasons.push('Tracking receipt / resi is required before closing this shipment.');
+
+  return {
+    canShip,
+    eligibleForClosing: canShip && shipmentRecorded && hasRequiredEvidence,
+    reasons,
+  };
 }
 
 /**
@@ -562,6 +640,15 @@ export function buildOrderFromCandidate(
     paymentMethod: method,
     paymentStatus: paymentEvaluation.status,
     paymentProofNotes: candidate.paymentProofClaimed ? 'Customer claimed payment transfer' : '',
+    payments: candidate.claimedPaymentAmount && candidate.claimedPaymentAmount > 0 ? [{
+      id: `pay_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      amount: candidate.claimedPaymentAmount,
+      method,
+      status: 'CLAIMED',
+      recordedAt: now,
+      reference: candidate.transferReference || undefined,
+      evidenceNote: candidate.paymentProofClaimed ? 'Customer claim/evidence received; human verification required.' : undefined,
+    }] : [],
     shipping: {
       courierName: candidate.courierName || settings.defaultCouriers[0] || 'J&T Express',
       quotedOngkir,
@@ -601,33 +688,49 @@ export function calculateTutupBukuMetrics(
   let unsettledCodOrdersCount = 0;
 
   const discrepancies: string[] = [];
-  const orderIds: string[] = [];
+  const eligibleOrderIds: string[] = [];
+  const rollForwardOrderIds: string[] = [];
+  const cancelledOrderIds: string[] = [];
 
+  // Closing is intentionally state-based, not calendar-based. Only active,
+  // unclosed, payment-complete and shipment-reconciled orders are included.
   for (const order of orders) {
-    if (order.shippingStatus === 'CANCELLED') continue;
+    if (order.isClosedInTutupBuku) continue;
+    if (order.paymentStatus === 'CANCELLED' || order.shippingStatus === 'CANCELLED') {
+      cancelledOrderIds.push(order.id);
+      continue;
+    }
 
-    orderIds.push(order.id);
+    const payment = getPaymentCompletion(order);
+    const shipment = evaluateShipmentEligibility(order);
+    if (!shipment.eligibleForClosing) {
+      rollForwardOrderIds.push(order.id);
+      if (!payment.isComplete) {
+        if (order.paymentMethod === 'COD' || order.paymentMethod === 'DIRECT_COD') {
+          unsettledCodOrdersCount++;
+          pendingCodAmount += payment.outstandingAmount;
+        } else {
+          pendingProofOrdersCount++;
+        }
+      }
+      discrepancies.push(`Order ${order.orderNumber} rolls forward: ${shipment.reasons.join(' ')}`);
+      continue;
+    }
+
+    eligibleOrderIds.push(order.id);
     totalGrossRevenue += order.financials.totalPayable;
     totalCOGS += order.financials.totalCOGS;
     totalNetProfit += order.financials.estimatedNetProfit;
+    completedOrdersCount++;
 
-    // Check payment completion
-    if (order.paymentStatus === 'VERIFIED') {
-      completedOrdersCount++;
-      if (order.paymentMethod === 'TRANSFER' || order.paymentMethod === 'QRIS') {
-        collectedTransferAmount += order.financials.totalPayable;
-      } else {
-        collectedCashAmount += order.financials.totalPayable;
-      }
-    } else if (order.paymentStatus === 'NEEDS_PROOF') {
-      pendingProofOrdersCount++;
-      discrepancies.push(`Order ${order.orderNumber} (${order.buyer.name}): Payment Rp ${order.financials.totalPayable.toLocaleString('id-ID')} is still unverified.`);
-    } else if (order.paymentStatus === 'COD_PENDING') {
-      unsettledCodOrdersCount++;
-      pendingCodAmount += order.financials.totalPayable;
-      discrepancies.push(`Order ${order.orderNumber} (${order.recipient.name}): COD Rp ${order.financials.totalPayable.toLocaleString('id-ID')} via ${order.shipping.courierName} is pending collection/disbursement.`);
+    if (order.paymentMethod === 'TRANSFER' || order.paymentMethod === 'QRIS') {
+      collectedTransferAmount += order.financials.totalPayable;
+    } else {
+      collectedCashAmount += order.financials.totalPayable;
     }
-
+    if (payment.overpaymentAmount > 0) {
+      discrepancies.push(`Order ${order.orderNumber}: verified overpayment Rp ${payment.overpaymentAmount.toLocaleString('id-ID')} requires reconciliation; it is not product revenue.`);
+    }
     if (order.financials.hasLossWarning) {
       discrepancies.push(`Warning on ${order.orderNumber}: Profit is below safeguard (Rp ${order.financials.estimatedNetProfit.toLocaleString('id-ID')}).`);
     }
@@ -641,7 +744,7 @@ export function calculateTutupBukuMetrics(
     date: dateStr,
     closedAt: now,
     closedBy,
-    totalOrdersCount: orderIds.length,
+    totalOrdersCount: eligibleOrderIds.length,
     completedOrdersCount,
     pendingProofOrdersCount,
     unsettledCodOrdersCount,
@@ -651,11 +754,16 @@ export function calculateTutupBukuMetrics(
     collectedTransferAmount,
     collectedCashAmount,
     pendingCodAmount,
-    orderIds,
+    orderIds: eligibleOrderIds,
+    eligibleOrderIds,
+    rollForwardOrderIds,
+    cancelledOrderIds,
+    rollForwardOrdersCount: rollForwardOrderIds.length,
+    cancelledOrdersCount: cancelledOrderIds.length,
     discrepancies,
-    notes: discrepancies.length === 0 
-      ? 'All transactions balanced and verified.' 
-      : `${discrepancies.length} item(s) need follow-up.`,
+    notes: discrepancies.length === 0
+      ? 'All active transactions were eligible and reconciled.'
+      : `${rollForwardOrderIds.length} transaction(s) roll forward; ${cancelledOrderIds.length} cancelled transaction(s) excluded.`,
   };
 }
 

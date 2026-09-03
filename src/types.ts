@@ -12,6 +12,21 @@ export type PaymentStatus =
   | 'REFUNDED'        // Refunded
   | 'CANCELLED';      // Cancelled
 
+export type PaymentEntryStatus = 'CLAIMED' | 'VERIFIED' | 'REFUNDED' | 'CANCELLED';
+
+/** A payment is recorded independently; only VERIFIED entries count toward settlement. */
+export interface PaymentEntry {
+  id: string;
+  amount: number;
+  method: PaymentMethod;
+  status: PaymentEntryStatus;
+  recordedAt: string;
+  verifiedAt?: string;
+  reference?: string;
+  evidenceNote?: string;
+  evidenceUrl?: string;
+}
+
 export type ShippingStatus = 
   | 'DRAFT'
   | 'PENDING_CONFIRMATION'
@@ -84,12 +99,13 @@ export interface FinancialBreakdown {
   subtotal: number;              // Sum of items price
   totalCOGS: number;             // Sum of items cost
   buyerOngkir: number;           // Shipping paid by buyer
+  quotedOngkir?: number;         // Courier charge; retained separately from product money
   sellerAbsorbedOngkir: number;  // Shipping subsidy by reseller
   discount: number;              // Special discounts
   otherFees: number;             // Packaging / handling
   totalPayable: number;          // subtotal + buyerOngkir + otherFees - discount
   estimatedGrossProfit: number;  // subtotal - totalCOGS
-  estimatedNetProfit: number;    // subtotal - totalCOGS - sellerAbsorbedOngkir + (buyerOngkir - quotedOngkir)
+  estimatedNetProfit: number;    // product profit minus the seller's unreimbursed shipping burden and adjustments
   profitMarginPercent: number;   // (netProfit / totalPayable) * 100
   hasLossWarning: boolean;       // If net profit <= 0 or margin below safeguard
   lossWarningReason?: string;
@@ -127,6 +143,7 @@ export interface ResellerOrder {
   paymentStatus: PaymentStatus;
   paymentProofNotes?: string;
   paymentVerifiedAt?: string;
+  payments?: PaymentEntry[];
   
   // Shipping
   shipping: ShippingDetails;
@@ -169,6 +186,11 @@ export interface DailyCloseRecord {
   pendingCodAmount: number;
   
   orderIds: string[];
+  eligibleOrderIds?: string[];
+  rollForwardOrderIds?: string[];
+  cancelledOrderIds?: string[];
+  rollForwardOrdersCount?: number;
+  cancelledOrdersCount?: number;
   notes?: string;
   discrepancies: string[];
 }

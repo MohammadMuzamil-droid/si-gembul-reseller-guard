@@ -4,12 +4,12 @@
  */
 
 import React, { useState } from 'react';
-import { ResellerOrder, ResellerSettings, AuditEntry } from '../../types';
+import { ResellerOrder, ResellerSettings, AuditEntry, PaymentEntry } from '../../types';
 import { 
   generateBuyerInvoiceText, 
   generateAdminOrderCard,
-  determinePaymentStatus,
-  calculateOrderFinancials
+  getPaymentCompletion,
+  evaluateShipmentEligibility
 } from '../../lib/deterministicEngine';
 import { 
   X, 
@@ -46,10 +46,16 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   
   // Quick status update states
   const [trackingNumberInput, setTrackingNumberInput] = useState(order.shipping.trackingNumber || '');
+  const [paymentAmountInput, setPaymentAmountInput] = useState('');
+  const [paymentReferenceInput, setPaymentReferenceInput] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
 
   const invoiceText = generateBuyerInvoiceText(order, settings);
   const adminCard = generateAdminOrderCard(order);
+  const paymentCompletion = getPaymentCompletion(order);
+  const shipmentEligibility = evaluateShipmentEligibility(order);
+  const isCancelled = order.paymentStatus === 'CANCELLED' || order.shippingStatus === 'CANCELLED';
+  const paymentEntries = order.payments || [];
 
   const handleCopyInvoice = () => {
     navigator.clipboard.writeText(invoiceText);
@@ -57,24 +63,82 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
     setTimeout(() => setCopiedInvoice(false), 2000);
   };
 
-  // Action: Verify Transfer Payment
+  const getPaymentStatusAfterVerification = (entries: PaymentEntry[]): ResellerOrder['paymentStatus'] => {
+    const verifiedTotal = entries
+      .filter((payment) => payment.status === 'VERIFIED')
+      .reduce((total, payment) => total + payment.amount, 0);
+    return verifiedTotal >= order.financials.totalPayable ? 'VERIFIED' : 'NEEDS_PROOF';
+  };
+
+  // A customer claim is retained, but never contributes to settlement until a human verifies it.
+  const handleRecordPaymentClaim = (e: React.FormEvent) => {
+    e.preventDefault();
+    const amount = Number(paymentAmountInput.replace(/[^0-9]/g, ''));
+    if (!Number.isFinite(amount) || amount <= 0 || isCancelled) return;
+    const now = new Date().toISOString();
+    const entry: PaymentEntry = {
+      id: `pay_${Date.now()}`,
+      amount,
+      method: order.paymentMethod,
+      status: 'CLAIMED',
+      recordedAt: now,
+      reference: paymentReferenceInput.trim() || undefined,
+      evidenceNote: 'Payment claim recorded; human verification is still required.',
+    };
+    const updated: ResellerOrder = {
+      ...order,
+      payments: [...paymentEntries, entry],
+      paymentStatus: order.paymentMethod === 'DIRECT_COD' ? 'COD_PENDING' : 'NEEDS_PROOF',
+      updatedAt: now,
+      auditTrail: [{
+        id: `aud_${Date.now()}`,
+        timestamp: now,
+        action: 'RECORD_PAYMENT_CLAIM',
+        actor: 'MANUAL_EDIT',
+        description: `Payment claim Rp ${amount.toLocaleString('id-ID')} recorded; it does not settle the order until verified.`,
+        previousState: `Verified total: Rp ${paymentCompletion.verifiedTotal.toLocaleString('id-ID')}`,
+        newState: 'Payment: awaiting verification',
+      }, ...order.auditTrail],
+    };
+    setPaymentAmountInput('');
+    setPaymentReferenceInput('');
+    onUpdateOrder(updated);
+  };
+
+  // Action: Verify one claimed transfer, or explicitly verify the outstanding balance for legacy orders.
   const handleVerifyPayment = () => {
     const now = new Date().toISOString();
+    const claimIndex = paymentEntries.findIndex((payment) => payment.status === 'CLAIMED');
+    const entries = claimIndex >= 0
+      ? paymentEntries.map((payment, index) => index === claimIndex
+        ? { ...payment, status: 'VERIFIED' as const, verifiedAt: now, evidenceNote: payment.evidenceNote || 'Verified against bank mutation.' }
+        : payment)
+      : [...paymentEntries, {
+          id: `pay_${Date.now()}`,
+          amount: paymentCompletion.outstandingAmount,
+          method: order.paymentMethod,
+          status: 'VERIFIED' as const,
+          recordedAt: now,
+          verifiedAt: now,
+          evidenceNote: 'Manual bank verification for remaining balance.',
+        }];
+    const nextStatus = getPaymentStatusAfterVerification(entries);
     const newAudit: AuditEntry = {
       id: `aud_${Date.now()}`,
       timestamp: now,
       action: 'VERIFY_PAYMENT',
       actor: 'USER_CONFIRMATION',
-      description: 'Payment explicitly verified against bank mutation.',
+      description: claimIndex >= 0 ? 'One recorded payment was explicitly verified against bank mutation.' : 'Outstanding payment was explicitly verified against bank mutation.',
       previousState: `Payment: ${order.paymentStatus}`,
-      newState: 'Payment: VERIFIED',
+      newState: `Payment: ${nextStatus}`,
     };
 
     const updated: ResellerOrder = {
       ...order,
-      paymentStatus: 'VERIFIED',
-      paymentVerifiedAt: now,
-      shippingStatus: order.shippingStatus === 'DRAFT' || order.shippingStatus === 'PENDING_CONFIRMATION' ? 'READY_TO_PACK' : order.shippingStatus,
+      payments: entries,
+      paymentStatus: nextStatus,
+      paymentVerifiedAt: nextStatus === 'VERIFIED' ? now : order.paymentVerifiedAt,
+      shippingStatus: nextStatus === 'VERIFIED' && (order.shippingStatus === 'DRAFT' || order.shippingStatus === 'PENDING_CONFIRMATION') ? 'READY_TO_PACK' : order.shippingStatus,
       updatedAt: now,
       auditTrail: [newAudit, ...order.auditTrail],
     };
@@ -85,6 +149,15 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   // Action: Confirm Physical Cash Receipt for Direct COD
   const handleVerifyDirectCodCash = () => {
     const now = new Date().toISOString();
+    const entries = [...paymentEntries, {
+      id: `pay_${Date.now()}`,
+      amount: paymentCompletion.outstandingAmount,
+      method: 'DIRECT_COD' as const,
+      status: 'VERIFIED' as const,
+      recordedAt: now,
+      verifiedAt: now,
+      evidenceNote: 'Physical cash collected and counted upon direct handover.',
+    }];
     const newAudit: AuditEntry = {
       id: `aud_${Date.now()}`,
       timestamp: now,
@@ -97,6 +170,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
 
     const updated: ResellerOrder = {
       ...order,
+      payments: entries,
       paymentStatus: 'VERIFIED',
       paymentVerifiedAt: now,
       shippingStatus: 'DELIVERED',
@@ -110,7 +184,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   // Action: Save Tracking Resi & Mark as Shipped
   const handleSaveTracking = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!trackingNumberInput.trim()) return;
+    if (!trackingNumberInput.trim() || !shipmentEligibility.canShip || isCancelled) return;
 
     const now = new Date().toISOString();
     const newAudit: AuditEntry = {
@@ -138,6 +212,27 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
     onUpdateOrder(updated);
   };
 
+  const handleCancelOrder = () => {
+    if (isCancelled || !window.confirm('Cancel this transaction? It will be retained as DIBATALKAN and excluded from Tutup Buku.')) return;
+    const now = new Date().toISOString();
+    const updated: ResellerOrder = {
+      ...order,
+      paymentStatus: 'CANCELLED',
+      shippingStatus: 'CANCELLED',
+      updatedAt: now,
+      auditTrail: [{
+        id: `aud_${Date.now()}`,
+        timestamp: now,
+        action: 'CANCEL_ORDER',
+        actor: 'USER_CONFIRMATION',
+        description: 'Transaction cancelled by reseller and retained as DIBATALKAN for audit.',
+        previousState: `Payment: ${order.paymentStatus}; Shipping: ${order.shippingStatus}`,
+        newState: 'DIBATALKAN',
+      }, ...order.auditTrail],
+    };
+    onUpdateOrder(updated);
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
       <div className="bg-white w-full max-w-3xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
@@ -149,11 +244,13 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 {order.orderNumber}
               </span>
               <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                isCancelled ? 'bg-rose-500/20 text-rose-200 border border-rose-500/30' :
                 order.paymentStatus === 'VERIFIED' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
                 order.paymentStatus === 'COD_PENDING' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
                 'bg-red-500/20 text-red-300 border border-red-500/30'
               }`}>
-                {order.paymentStatus === 'VERIFIED' ? 'Payment Verified' :
+                {isCancelled ? 'DIBATALKAN' :
+                 order.paymentStatus === 'VERIFIED' ? 'Payment Verified' :
                  order.paymentStatus === 'COD_PENDING' ? 'COD Pending' :
                  'Payment Needs Proof'}
               </span>
@@ -259,6 +356,50 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                   </div>
                 </div>
               </div>
+
+              <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-bold text-slate-900">Payment reconciliation</span>
+                  <span className={paymentCompletion.isComplete ? 'font-bold text-emerald-700' : 'font-bold text-amber-700'}>
+                    Verified Rp {paymentCompletion.verifiedTotal.toLocaleString('id-ID')} / Rp {paymentCompletion.finalAmountDue.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                {paymentCompletion.overpaymentAmount > 0 && (
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    Overpayment Rp {paymentCompletion.overpaymentAmount.toLocaleString('id-ID')} needs reconciliation; it is not product revenue.
+                  </p>
+                )}
+                {paymentEntries.length > 0 && (
+                  <div className="divide-y divide-slate-100 text-xs">
+                    {paymentEntries.map((payment) => (
+                      <div key={payment.id} className="py-2 flex items-center justify-between gap-3">
+                        <span>Rp {payment.amount.toLocaleString('id-ID')} • {payment.method}{payment.reference ? ` • ${payment.reference}` : ''}</span>
+                        <span className={payment.status === 'VERIFIED' ? 'font-bold text-emerald-700' : 'font-bold text-amber-700'}>{payment.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!isCancelled && order.paymentMethod !== 'DIRECT_COD' && (
+                  <form onSubmit={handleRecordPaymentClaim} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+                    <input
+                      inputMode="numeric"
+                      value={paymentAmountInput}
+                      onChange={(e) => setPaymentAmountInput(e.target.value)}
+                      placeholder="Claimed amount (Rp)"
+                      className="px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                    />
+                    <input
+                      value={paymentReferenceInput}
+                      onChange={(e) => setPaymentReferenceInput(e.target.value)}
+                      placeholder="Transfer reference (optional)"
+                      className="px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                    />
+                    <button type="submit" className="px-3 py-2 bg-slate-900 text-white font-bold text-xs rounded-lg disabled:opacity-40" disabled={!paymentAmountInput.trim()}>
+                      Record claim
+                    </button>
+                  </form>
+                )}
+              </div>
             </div>
           )}
 
@@ -323,6 +464,11 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 <p className="text-slate-800">{adminCard.courierLabel}</p>
               </div>
 
+              <div className={`p-3 border rounded-xl text-xs ${shipmentEligibility.eligibleForClosing ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+                <span className="font-bold">Shipment & Tutup Buku eligibility:</span>{' '}
+                {shipmentEligibility.eligibleForClosing ? 'Ready for closing once selected.' : shipmentEligibility.reasons.join(' ')}
+              </div>
+
               {/* Shipping Resi Management */}
               <form onSubmit={handleSaveTracking} className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                 <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
@@ -335,11 +481,13 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                     value={trackingNumberInput}
                     onChange={(e) => setTrackingNumberInput(e.target.value)}
                     placeholder="Enter No. Resi (e.g. JT991823746)"
-                    className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs"
+                    className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs disabled:bg-slate-100"
+                    disabled={!shipmentEligibility.canShip || isCancelled}
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                    disabled={!shipmentEligibility.canShip || isCancelled}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-40"
                   >
                     Save & Mark Shipped
                   </button>
@@ -385,7 +533,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
         {/* Modal Bottom Operational Controls */}
         <div className="bg-slate-100 border-t border-slate-200 p-4 px-5 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2">
-            {order.paymentStatus === 'NEEDS_PROOF' && (
+            {!isCancelled && order.paymentStatus === 'NEEDS_PROOF' && (
               <button
                 type="button"
                 onClick={handleVerifyPayment}
@@ -396,7 +544,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
               </button>
             )}
 
-            {order.paymentMethod === 'DIRECT_COD' && order.paymentStatus === 'COD_PENDING' && (
+            {!isCancelled && order.paymentMethod === 'DIRECT_COD' && order.paymentStatus === 'COD_PENDING' && (
               <button
                 type="button"
                 onClick={handleVerifyDirectCodCash}
@@ -404,6 +552,17 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
               >
                 <Check className="w-4 h-4" />
                 <span>Confirm Physical Cash Handover</span>
+              </button>
+            )}
+
+            {!isCancelled && (
+              <button
+                type="button"
+                onClick={handleCancelOrder}
+                className="px-3.5 py-2 bg-white border border-rose-300 hover:bg-rose-50 text-rose-700 font-bold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <AlertTriangle className="w-4 h-4" />
+                <span>Cancel & retain as DIBATALKAN</span>
               </button>
             )}
           </div>

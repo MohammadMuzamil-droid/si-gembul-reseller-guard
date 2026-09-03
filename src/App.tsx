@@ -311,6 +311,18 @@ export default function App() {
   const handleSaveDailyClose = async (record: DailyCloseRecord) => {
     if (!currentUser) return;
     await saveUserDailyClose(currentUser.uid, record);
+    const closedIds = new Set(record.eligibleOrderIds || record.orderIds);
+    if (closedIds.size > 0) {
+      const closedAt = new Date().toISOString();
+      const nextOrders = orders.map(order => closedIds.has(order.id)
+        ? { ...order, isClosedInTutupBuku: true, tutupBukuId: record.id, updatedAt: closedAt }
+        : order
+      );
+      for (const order of nextOrders) {
+        if (closedIds.has(order.id)) await saveUserOrder(currentUser.uid, order);
+      }
+      setOrders(nextOrders);
+    }
     const updatedCloses = await fetchUserDailyCloses(currentUser.uid);
     setDailyCloses(updatedCloses);
     showToast(`Tutup Buku for ${record.date} successfully recorded!`);
