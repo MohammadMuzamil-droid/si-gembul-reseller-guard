@@ -33,6 +33,7 @@ Scope: Firebase ID-token protection for the Gemini interpretation API, browser-s
 | Deterministic core | `scripts/phase3a-core-transaction.test.ts` | PASS |
 | Customer Intelligence | `scripts/phase3b-customer-intelligence.test.ts` | PASS |
 | Live authenticated Gemini | Signed-in prototype processed synthetic `Premium: 2 pcs` with Gemini, sales Rp50.000, COGS Rp40.000, profit Rp10.000, margin 20%; the incomplete candidate confirmation remained disabled and no order was created | PASS |
+| Live Gemini multi-turn | Follow-up about the latest Premium transaction returned the authoritative context of 2 pcs and normalized total 2 pcs, marked Gemini; no order was created | PASS |
 | Live Customer Intelligence | Current prototype loaded buyer-first completed history, eligibility exclusions, median interval, and repeat-order opportunity without an error | PASS |
 | Browser console | During the authenticated request, only request-start and HTTP 200 informational diagnostics were observed | PASS |
 | Server logs | Invalid-token log is bounded to category `AUTH_INVALID`; no token value or raw provider response was observed in the relevant revision logs | PASS |
