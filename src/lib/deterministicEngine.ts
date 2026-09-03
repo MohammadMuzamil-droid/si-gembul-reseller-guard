@@ -35,19 +35,27 @@ export function normalizeProduct(
     }
   }
 
-  // 1. Direct SKU match
-  if (candidateSku && candidateSku !== 'CUSTOM') {
-    const skuMatch = combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
-    if (skuMatch) return skuMatch;
-  }
-
   const cleanQuery = (query || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
-  if (!cleanQuery) return undefined;
+  if (!cleanQuery) {
+    if (candidateSku && candidateSku !== 'CUSTOM') {
+      return combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
+    }
+    return undefined;
+  }
+
+  const hasKgQuantity = /(?:^|\s)\d+\s*kg\b/.test(cleanQuery);
+
+  // 1. Direct SKU match, unless the user explicitly supplied a kg quantity.
+  // A weight expression is stronger evidence than an absent or stale extracted SKU.
+  if (!hasKgQuantity && candidateSku && candidateSku !== 'CUSTOM') {
+    const skuMatch = combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
+    if (skuMatch) return skuMatch;
+  }
 
   // 2. Exact name or SKU match
   const exact = combinedCatalog.find(p => 
@@ -57,7 +65,7 @@ export function normalizeProduct(
   if (exact) return exact;
 
   // 3. Explicit keywords normalization for standard product variations
-  const is1kg = cleanQuery.includes('1kg') || cleanQuery.includes('1 kg') || cleanQuery.includes('1000g') || cleanQuery.includes('1000 g') || cleanQuery.includes('bulk');
+  const is1kg = hasKgQuantity || cleanQuery.includes('1000g') || cleanQuery.includes('1000 g') || cleanQuery.includes('bulk');
   const isMedium = cleanQuery.includes('medium') || cleanQuery.includes('med ');
   const isPremium = cleanQuery.includes('premium') || cleanQuery.includes('prem ') || cleanQuery.includes('specialty');
 
@@ -244,8 +252,9 @@ export function matchItemsWithCatalog(
   let totalOrderPieces = 0;
 
   for (const item of candidateItems) {
+    const itemText = [item.productName, item.rawText].filter(Boolean).join(' ');
     const matchedProduct = normalizeProduct(
-      item.productName || item.rawText || '',
+      itemText,
       item.matchedSku,
       catalog
     );

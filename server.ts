@@ -347,7 +347,7 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     if (exact) return exact;
 
     // 2. Keyword normalization
-    const is1kg = clean.includes('1kg') || clean.includes('1 kg') || clean.includes('1000g') || clean.includes('1000 g') || clean.includes('bulk');
+    const is1kg = /(?:^|\s)\d+\s*kg\b/.test(clean) || clean.includes('1000g') || clean.includes('1000 g') || clean.includes('bulk');
     const isMed = clean.includes('medium') || clean.includes('med ');
     const isPrem = clean.includes('premium') || clean.includes('prem ') || clean.includes('specialty');
 
@@ -369,7 +369,7 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     const itemChunks = orderSection.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
     for (const chunk of itemChunks) {
       const itemMatch1 = chunk.match(/^(\d+)\s*(?:x|pcs|bks|bungkus|pack|box|cup|botol|can)?\s*(.+?)(?:\s*(?:@|harga|sebesar|rp)?\s*(?:rp\.?\s*)?([\d\.,]+))?$/i);
-      const itemMatch2 = chunk.match(/^(.+?)\s*(\d+)\s*(?:pcs|bks|bungkus|pack|box|cup|botol|can)?$/i);
+      const itemMatch2 = chunk.match(/^(.+?)\s*(\d+)\s*(kg|pcs|bks|bungkus|pack|box|cup|botol|can)?$/i);
 
       let qty = 1;
       let prodName = chunk;
@@ -381,7 +381,8 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
         explicitPrice = itemMatch1[3] ? parseInt(itemMatch1[3].replace(/[\.,]/g, ''), 10) : undefined;
       } else if (itemMatch2) {
         qty = parseInt(itemMatch2[2], 10) || 1;
-        prodName = itemMatch2[1].trim();
+        const unit = itemMatch2[3]?.toLowerCase();
+        prodName = unit === 'kg' ? `${itemMatch2[1].trim()} 1kg` : itemMatch2[1].trim();
       }
 
       // Check if matches catalog
