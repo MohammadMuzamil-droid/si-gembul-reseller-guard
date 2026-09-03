@@ -31,12 +31,14 @@ import { DEFAULT_SETTINGS, getSyntheticDemoOrders, INITIAL_CATALOG } from './dat
 import { AuthOverlay } from './components/auth/AuthOverlay';
 import { AgentChatDesk } from './components/chat/AgentChatDesk';
 import { OrderList } from './components/orders/OrderList';
+import { CustomerInsightsView } from './components/customers/CustomerInsightsView';
 import { TutupBukuView } from './components/tutupbuku/TutupBukuView';
 import { AdvancedSettings } from './components/settings/AdvancedSettings';
 import { SiGembulMascot } from './components/mascot/SiGembulMascot';
 import { 
   MessageSquareText, 
   PackageCheck, 
+  UsersRound,
   BookOpen, 
   Settings2, 
   LogOut, 
@@ -53,7 +55,7 @@ export default function App() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   // Active View State
-  const [activeTab, setActiveTab] = useState<'agent_desk' | 'orders' | 'tutup_buku' | 'settings'>('agent_desk');
+  const [activeTab, setActiveTab] = useState<'agent_desk' | 'orders' | 'customer_insights' | 'tutup_buku' | 'settings'>('agent_desk');
 
   // Authoritative State for the Current Authenticated User
   const [orders, setOrders] = useState<ResellerOrder[]>([]);
@@ -441,6 +443,18 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab('customer_insights')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-2 ${
+                activeTab === 'customer_insights'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <UsersRound className="w-4 h-4" />
+              <span>Customer Insights</span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('tutup_buku')}
               className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-2 ${
                 activeTab === 'tutup_buku'
@@ -492,6 +506,10 @@ export default function App() {
             onUpdateOrder={handleUpdateOrder}
             onNewOrderRequest={() => setActiveTab('agent_desk')}
           />
+        )}
+
+        {activeTab === 'customer_insights' && (
+          <CustomerInsightsView userId={currentUser.uid} orders={orders} />
         )}
 
         {activeTab === 'tutup_buku' && (

@@ -163,14 +163,54 @@ export const DEFAULT_SETTINGS: ResellerSettings = {
 export function getSyntheticDemoOrders(userId: string): ResellerOrder[] {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const makeCompletedCustomerOrder = (
+    id: string,
+    sequence: string,
+    buyerName: string,
+    buyerPhone: string,
+    daysAgo: number,
+    items: ResellerOrder['items'],
+  ): ResellerOrder => {
+    const createdAt = new Date(Date.now() - daysAgo * 86_400_000).toISOString();
+    const subtotal = items.reduce((sum, item) => sum + item.totalPrice, 0);
+    const totalCOGS = items.reduce((sum, item) => sum + item.totalCost, 0);
+    const profit = subtotal - totalCOGS;
+    return {
+      id: `ord_${userId}_${id}`,
+      userId,
+      orderNumber: `SGB-${todayStr}-${sequence}`,
+      createdAt,
+      updatedAt: createdAt,
+      buyer: { name: buyerName, phone: buyerPhone },
+      payer: { name: buyerName, bankName: 'BCA' },
+      recipient: { name: buyerName, phone: buyerPhone, address: 'Jl. Cendana No. 12, Bandung', city: 'Bandung' },
+      items,
+      financials: {
+        subtotal, totalCOGS, buyerOngkir: 0, sellerAbsorbedOngkir: 0, discount: 0, otherFees: 0,
+        totalPayable: subtotal, estimatedGrossProfit: profit, estimatedNetProfit: profit,
+        profitMarginPercent: subtotal ? Math.round((profit / subtotal) * 1000) / 10 : 0, hasLossWarning: false,
+      },
+      paymentMethod: 'TRANSFER',
+      paymentStatus: 'VERIFIED',
+      paymentProofNotes: 'Synthetic demo transfer verified.',
+      paymentVerifiedAt: createdAt,
+      shipping: { courierName: 'J&T Express', quotedOngkir: 0, buyerOngkir: 0, sellerAbsorbedOngkir: 0, trackingNumber: `JT-DEMO-${sequence}`, shippedAt: createdAt },
+      shippingStatus: 'SHIPPED',
+      needsConfirmation: false,
+      confirmationReasons: [],
+      aiExtractionConfidence: 1,
+      auditTrail: [{ id: `aud_${id}`, timestamp: createdAt, action: 'SYNTHETIC_DEMO_COMPLETED_ORDER', actor: 'SYSTEM_RULE', description: 'Synthetic completed order for Customer Intelligence acceptance.' }],
+      isClosedInTutupBuku: false,
+    };
+  };
 
   return [
     {
       id: `ord_${userId}_001`,
       userId,
       orderNumber: `SGB-${todayStr}-101`,
-      createdAt: new Date(Date.now() - 3600 * 1000 * 4).toISOString(),
-      updatedAt: new Date(Date.now() - 3600 * 1000 * 3).toISOString(),
+      createdAt: new Date(Date.now() - 24 * 86_400_000).toISOString(),
+      updatedAt: new Date(Date.now() - 24 * 86_400_000).toISOString(),
       buyer: {
         name: 'Siti Rahmawati',
         phone: '081298765432',
@@ -226,14 +266,14 @@ export function getSyntheticDemoOrders(userId: string): ResellerOrder[] {
       paymentMethod: 'TRANSFER',
       paymentStatus: 'VERIFIED',
       paymentProofNotes: 'Transfer BCA Rp 192.000 verified via m-banking mutation',
-      paymentVerifiedAt: new Date(Date.now() - 3600 * 1000 * 3).toISOString(),
+      paymentVerifiedAt: new Date(Date.now() - 24 * 86_400_000).toISOString(),
       shipping: {
         courierName: 'J&T Express',
         quotedOngkir: 12000,
         buyerOngkir: 12000,
         sellerAbsorbedOngkir: 0,
         trackingNumber: 'JT88291048201',
-        shippedAt: new Date(Date.now() - 3600 * 1000 * 2).toISOString(),
+        shippedAt: new Date(Date.now() - 24 * 86_400_000).toISOString(),
       },
       shippingStatus: 'SHIPPED',
       needsConfirmation: false,
@@ -416,5 +456,22 @@ export function getSyntheticDemoOrders(userId: string): ResellerOrder[] {
       ],
       isClosedInTutupBuku: false,
     },
+    makeCompletedCustomerOrder('004', '104', 'Siti Rahmawati', '081298765432', 52, [
+      { productId: 'prod_gayo_250', sku: 'KOPI-GAYO-250', name: 'Kopi Arabika Gayo Aceh 250g (Medium Roast)', quantity: 1, unitPrice: 65000, baseCost: 45000, totalPrice: 65000, totalCost: 45000 },
+    ]),
+    makeCompletedCustomerOrder('005', '105', 'Siti Rahmawati', '081298765432', 80, [
+      { productId: 'prod_gayo_250', sku: 'KOPI-GAYO-250', name: 'Kopi Arabika Gayo Aceh 250g (Medium Roast)', quantity: 2, unitPrice: 65000, baseCost: 45000, totalPrice: 130000, totalCost: 90000 },
+    ]),
+    {
+      ...makeCompletedCustomerOrder('006', '106', 'Siti Rahmawati', '081298765432', 10, [
+        { productId: 'prod_gayo_250', sku: 'KOPI-GAYO-250', name: 'Kopi Arabika Gayo Aceh 250g (Medium Roast)', quantity: 1, unitPrice: 65000, baseCost: 45000, totalPrice: 65000, totalCost: 45000 },
+      ]),
+      paymentStatus: 'CANCELLED',
+      shippingStatus: 'CANCELLED',
+      auditTrail: [{ id: 'aud_006_cancelled', timestamp: new Date(Date.now() - 10 * 86_400_000).toISOString(), action: 'CANCEL_ORDER', actor: 'USER_CONFIRMATION', description: 'Synthetic cancelled order retained for exclusion testing.' }],
+    },
+    makeCompletedCustomerOrder('007', '107', 'Maya Kurnia', '081377700001', 7, [
+      { productId: 'prod_drip_10s', sku: 'KOPI-DRIP-10S', name: 'Drip Bag Coffee Nusantara (Isi 10 Sachet)', quantity: 1, unitPrice: 50000, baseCost: 32000, totalPrice: 50000, totalCost: 32000 },
+    ]),
   ];
 }
