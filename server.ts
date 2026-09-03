@@ -8,6 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
+import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -96,6 +98,34 @@ const EXTRACTION_SCHEMA: Schema = {
 function isConversationalQuestion(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   return /\?|\b(what|how|which|when|where|why|berapa|berapa banyak|jumlah|kuantitas|quantity|profit|laba|margin|sales|cogs|equivalent|setara)\b/.test(normalized);
+}
+
+function getFirebaseAdminAuth() {
+  const adminApp = getApps()[0] || initializeApp({ credential: applicationDefault() });
+  return getAuth(adminApp);
+}
+
+function sendSafeError(res: Response, status: number, code: string, error: string) {
+  res.status(status).json({ code, error });
+}
+
+async function verifyFirebaseRequest(req: Request, res: Response): Promise<boolean> {
+  const authorization = req.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+
+  if (!token) {
+    sendSafeError(res, 401, 'AUTH_REQUIRED', 'Authentication is required. Please sign in and try again.');
+    return false;
+  }
+
+  try {
+    await getFirebaseAdminAuth().verifyIdToken(token);
+    return true;
+  } catch {
+    console.warn('Firebase ID token verification failed', { category: 'AUTH_INVALID' });
+    sendSafeError(res, 401, 'AUTH_INVALID', 'Your session could not be verified. Please sign in again.');
+    return false;
+  }
 }
 
 function getLatestTransactionCandidate(conversationHistory: any[]): any | undefined {
@@ -236,6 +266,10 @@ app.get('/api/health', (req: Request, res: Response) => {
 
 // Gemini Multi-turn Agent Interpret Endpoint
 app.post('/api/agent/interpret', async (req: Request, res: Response) => {
+  if (!(await verifyFirebaseRequest(req, res))) {
+    return;
+  }
+
   try {
     const { 
       message, 
@@ -247,7 +281,7 @@ app.post('/api/agent/interpret', async (req: Request, res: Response) => {
     } = req.body;
 
     if (!message && !imageBase64) {
-      res.status(400).json({ error: 'Message or image evidence is required.' });
+      sendSafeError(res, 400, 'REQUEST_INVALID', 'Message or image evidence is required.');
       return;
     }
 
@@ -395,7 +429,7 @@ Store Context:
     try {
       candidateData = JSON.parse(responseText);
     } catch (parseErr) {
-      console.error('Failed to parse Gemini JSON response:', responseText);
+      console.warn('Gemini response parsing failed', { provider: 'gemini', category: 'AI_RESPONSE_INVALID' });
       candidateData = { ...fallbackDeterministicParser(message, catalog), responseMode: 'TRANSACTION' };
       provider = 'fallback';
     }
@@ -413,13 +447,9 @@ Store Context:
       isAIPowered: provider === 'gemini',
       rawExplanation: candidateData.explanation,
     });
-  } catch (error: any) {
-    console.error('Gemini interpretation error:', error);
-    res.status(500).json({
-      error: error.message || 'Failed to process agent interpretation',
-      candidate: fallbackDeterministicParser(req.body.message || '', req.body.catalog || []),
-      provider: 'fallback',
-    });
+  } catch {
+    console.error('Gemini interpretation failed', { provider: 'gemini', category: 'AI_UNAVAILABLE' });
+    sendSafeError(res, 503, 'AI_UNAVAILABLE', 'The AI service is temporarily unavailable. Nothing was saved. Please try again.');
   }
 });
 

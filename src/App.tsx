@@ -163,15 +163,28 @@ export default function App() {
     let requestStage = 'initiating_fetch';
     let receivedHttpResponse = false;
     let httpStatus: number | null = null;
-    let httpStatusText: string | null = null;
-    let safeResponseBodyPreview: string | null = null;
+    let errorCode = 'TEMPORARY_SERVICE_ISSUE';
 
     try {
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) {
+        requestStage = 'firebase_session_missing';
+        throw new Error('AUTH_REQUIRED');
+      }
+      const idToken = await firebaseUser.getIdToken();
+      if (!idToken) {
+        requestStage = 'firebase_token_missing';
+        throw new Error('AUTH_REQUIRED');
+      }
+
       console.info(`[AgentDesk Diagnostic] Starting request: ${requestMethod} ${requestRoute} (Stage: ${requestStage})`);
       
       const response = await fetch(requestRoute, {
         method: requestMethod,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           message: text,
           conversationHistory: newChatList,
@@ -184,31 +197,38 @@ export default function App() {
       receivedHttpResponse = true;
       requestStage = 'response_received';
       httpStatus = response.status;
-      httpStatusText = response.statusText;
 
-      console.info(`[AgentDesk Diagnostic] Received HTTP response: Status ${httpStatus} ${httpStatusText} (Stage: ${requestStage})`);
+      console.info(`[AgentDesk Diagnostic] Received HTTP response: Status ${httpStatus} (Stage: ${requestStage})`);
 
       requestStage = 'reading_response_body';
       const rawText = await response.text();
-      safeResponseBodyPreview = rawText.slice(0, 300);
+      const contentType = response.headers.get('content-type') || '';
+      const isJsonResponse = contentType.toLowerCase().includes('application/json');
 
       if (!response.ok) {
         requestStage = 'server_returned_error_status';
-        throw new Error(`Temporary service issue (HTTP ${response.status}). Nothing was saved. Please try again.`);
+        if (isJsonResponse && rawText) {
+          try {
+            const errorBody = JSON.parse(rawText);
+            errorCode = typeof errorBody.code === 'string' ? errorBody.code : errorCode;
+          } catch {
+            errorCode = 'TEMPORARY_SERVICE_ISSUE';
+          }
+        }
+        throw new Error(errorCode);
       }
 
-      const contentType = response.headers.get('content-type') || '';
-      if (!contentType.toLowerCase().includes('application/json')) {
+      if (!isJsonResponse) {
         requestStage = 'unexpected_response_content_type';
-        throw new Error('Temporary service issue: the service returned an unexpected response. Nothing was saved. Please try again.');
+        throw new Error('TEMPORARY_SERVICE_ISSUE');
       }
 
       requestStage = 'parsing_json_body';
       let data: any = {};
       try {
         data = rawText ? JSON.parse(rawText) : {};
-      } catch (parseErr: any) {
-        throw new Error('Temporary service issue: the response could not be read safely. Nothing was saved. Please try again.');
+      } catch {
+        throw new Error('TEMPORARY_SERVICE_ISSUE');
       }
 
       requestStage = 'processing_candidate_success';
@@ -232,19 +252,25 @@ export default function App() {
         receivedHttpResponse,
         failedBeforeHttpResponse: !receivedHttpResponse,
         httpStatus,
-        httpStatusText,
-        responseBodyPreview: safeResponseBodyPreview,
-        errorName: err?.name || 'Error',
-        errorMessage: err?.message || String(err),
+        errorCode: err?.message || errorCode,
       };
 
       console.error('[AgentDesk Diagnostic] Request Failure Breakdown:', diagnosticReport);
-      console.error('Agent chat error:', err);
+
+      const safeErrorMessages: Record<string, string> = {
+        AUTH_REQUIRED: 'Your secure session needs verification. Please sign in again.',
+        AUTH_INVALID: 'Your secure session could not be verified. Please sign in again.',
+        AI_UNAVAILABLE: 'Temporary AI service issue. Nothing was saved. Please try again.',
+        AI_RESPONSE_INVALID: 'Temporary AI service issue. Nothing was saved. Please try again.',
+        INTERNAL_ERROR: 'Temporary service issue. Nothing was saved. Please try again.',
+        TEMPORARY_SERVICE_ISSUE: 'Temporary service issue. Nothing was saved. Please try again.',
+      };
+      const safeMessage = safeErrorMessages[err?.message] || safeErrorMessages.TEMPORARY_SERVICE_ISSUE;
 
       const errorMsg: AgentChatMessage = {
         id: `msg_err_${Date.now()}`,
         role: 'assistant',
-        content: `Sorry, I encountered an issue analyzing the evidence: ${err.message}. Please try sending again or input details directly.`,
+        content: `${safeMessage} You can safely try again.`,
         timestamp: new Date().toISOString(),
       };
       const finalChatList = [...newChatList, errorMsg];

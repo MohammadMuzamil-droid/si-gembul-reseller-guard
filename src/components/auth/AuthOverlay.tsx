@@ -87,49 +87,14 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  // Instant Synthetic Demo Switcher with Real Firebase Authentication
-  const handleDemoSignIn = async (accountKey: 'demo-reseller-1' | 'demo-reseller-2') => {
+  // Demo shortcut selects a non-sensitive email; the presenter enters the password manually.
+  const handleDemoSelection = (accountKey: 'demo-reseller-1' | 'demo-reseller-2') => {
     setErrorMsg('');
-    setIsLoading(true);
-    const email = accountKey === 'demo-reseller-1' 
+    setIsSignUp(false);
+    setEmail(accountKey === 'demo-reseller-1'
       ? 'barista.budi@kopinusantara.demo' 
-      : 'berkah.store@resellerhub.demo';
-    const password = 'DemoPassword123!';
-    const displayName = accountKey === 'demo-reseller-1' 
-      ? 'Budi (Kopi Nusantara)' 
-      : 'Toko Berkah (Multi-Product)';
-
-    try {
-      let cred;
-      try {
-        cred = await signInWithEmailAndPassword(auth, email, password);
-      } catch (signInErr: any) {
-        if (
-          signInErr.code === 'auth/user-not-found' || 
-          signInErr.code === 'auth/invalid-credential' || 
-          signInErr.code === 'auth/wrong-password' ||
-          signInErr.code === 'auth/invalid-login-credentials'
-        ) {
-          cred = await createUserWithEmailAndPassword(auth, email, password);
-        } else {
-          throw signInErr;
-        }
-      }
-      onLoginSuccess({
-        uid: cred.user.uid,
-        email: cred.user.email,
-        displayName: cred.user.displayName || displayName,
-      });
-    } catch (err: any) {
-      console.error('Firebase Auth Demo sign-in error:', err);
-      if (err.code === 'auth/operation-not-allowed') {
-        setErrorMsg('Firebase Authentication Provider (Email/Password) is currently disabled in your Firebase Project Console. Please enable Email/Password under Authentication > Sign-in method in the Firebase Console.');
-      } else {
-        setErrorMsg('Firebase Authentication failed: ' + (err.message || ''));
-      }
-    } finally {
-      setIsLoading(false);
-    }
+      : 'berkah.store@resellerhub.demo');
+    setPassword('');
   };
 
   return (
@@ -233,16 +198,20 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({ onLoginSuccess }) => {
           <div className="my-5 flex items-center gap-3">
             <div className="h-px bg-slate-200 flex-1" />
             <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
-              Or Fast Demo Sign In
+              Demo Account Shortcut
             </span>
             <div className="h-px bg-slate-200 flex-1" />
           </div>
 
-          {/* Instant Synthetic Demo Accounts */}
+          <p className="mb-2 text-center text-[11px] text-slate-500">
+            Select a demo email, then enter its password manually.
+          </p>
+
+          {/* Synthetic demo account email shortcuts */}
           <div className="space-y-2">
             <button
               type="button"
-              onClick={() => handleDemoSignIn('demo-reseller-1')}
+              onClick={() => handleDemoSelection('demo-reseller-1')}
               className="w-full p-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg text-left transition-colors flex items-center justify-between cursor-pointer group"
             >
               <div className="flex items-center gap-2.5">
@@ -261,7 +230,7 @@ export const AuthOverlay: React.FC<AuthOverlayProps> = ({ onLoginSuccess }) => {
 
             <button
               type="button"
-              onClick={() => handleDemoSignIn('demo-reseller-2')}
+              onClick={() => handleDemoSelection('demo-reseller-2')}
               className="w-full p-2.5 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg text-left transition-colors flex items-center justify-between cursor-pointer group"
             >
               <div className="flex items-center gap-2.5">
