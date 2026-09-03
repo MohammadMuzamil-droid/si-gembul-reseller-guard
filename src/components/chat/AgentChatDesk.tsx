@@ -270,6 +270,13 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
                       <div className="whitespace-pre-wrap leading-relaxed font-sans">
                         {msg.content}
                       </div>
+                      {msg.provider && (
+                        <span className={`inline-flex mt-2 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                          msg.provider === 'gemini' ? 'bg-violet-50 text-violet-700' : 'bg-amber-50 text-amber-700'
+                        }`}>
+                          {msg.provider === 'gemini' ? 'Gemini' : 'Fallback'}
+                        </span>
+                      )}
                     </div>
 
                     {/* Extracted Structured Candidate Card */}

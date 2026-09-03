@@ -148,6 +148,8 @@ function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) 
 
   return {
     items,
+    normalizedTotalPieces: parsedItems.reduce((total: number, item: any) => total + item.normalizedPieces, 0),
+    isBulkEligible,
     financials: {
       sales,
       cogs,
@@ -155,6 +157,30 @@ function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) 
       marginPercent: sales > 0 ? Math.round((profit / sales) * 1000) / 10 : 0,
     },
   };
+}
+
+function buildAuthoritativeConversationReply(message: string, candidate: any, catalog: any[] = []): string {
+  const context = buildStructuredTransactionContext(candidate, catalog);
+  const normalizedMessage = message.toLowerCase();
+  const asksQuantity = /\b(quantity|how many|equivalent|pieces|pcs|kg|jumlah|berapa|kuantitas|setara)\b/.test(normalizedMessage);
+  const asksFinancials = /\b(sales|cogs|profit|margin|laba|untung|penjualan|modal)\b/.test(normalizedMessage);
+  const asksProduct = /\b(sku|product|produk|item)\b/.test(normalizedMessage);
+
+  if (!asksQuantity && !asksFinancials && !asksProduct) {
+    return 'That requested detail is not available as an authoritative fact in the latest transaction context.';
+  }
+
+  const itemSummary = context.items.map((item: any) =>
+    `${item.originalQuantity} ${item.originalUnit} ${item.productName} (${item.normalizedPieces} pcs equivalent)`
+  ).join(', ');
+  const facts = [`Authoritative transaction: ${itemSummary}.`];
+  if (asksQuantity) {
+    facts.push(`Normalized total: ${context.normalizedTotalPieces} pcs${context.isBulkEligible ? ' (bulk pricing active)' : ''}.`);
+  }
+  if (asksFinancials) {
+    facts.push(`Sales: Rp ${context.financials.sales.toLocaleString('id-ID')}; COGS: Rp ${context.financials.cogs.toLocaleString('id-ID')}; Profit: Rp ${context.financials.profit.toLocaleString('id-ID')} (Margin: ${context.financials.marginPercent}%).`);
+  }
+  return facts.join(' ');
 }
 
 function isContextualUpdate(message: string, conversationHistory: any[]): boolean {
@@ -191,14 +217,9 @@ function buildFallbackConversationReply(message: string, conversationHistory: an
     };
   }
 
-  const context = buildStructuredTransactionContext(latestCandidate, catalog);
-  const itemSummary = context.items.map((item: any) => {
-    return `${item.originalQuantity} ${item.originalUnit} ${item.productName} (${item.normalizedPieces} pcs equivalent)`;
-  }).join(', ');
-
   return {
     responseMode: 'CONVERSATION',
-    explanation: `The most recent transaction was ${itemSummary}. Sales: Rp ${context.financials.sales.toLocaleString('id-ID')}; COGS: Rp ${context.financials.cogs.toLocaleString('id-ID')}; Profit: Rp ${context.financials.profit.toLocaleString('id-ID')} (Margin: ${context.financials.marginPercent}%).`,
+    explanation: buildAuthoritativeConversationReply(message, latestCandidate, catalog),
   };
 }
 
@@ -378,11 +399,15 @@ Store Context:
       provider = 'fallback';
     }
 
-    const isConversation = candidateData.responseMode === 'CONVERSATION';
+    const latestCandidate = getLatestTransactionCandidate(conversationHistory);
+    const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
+    const isConversation = candidateData.responseMode === 'CONVERSATION' || usesAuthoritativeFacts;
     res.json({
       candidate: isConversation ? undefined : candidateData,
-      responseMode: candidateData.responseMode,
-      explanation: candidateData.explanation,
+      responseMode: isConversation ? 'CONVERSATION' : candidateData.responseMode,
+      explanation: usesAuthoritativeFacts
+        ? buildAuthoritativeConversationReply(message || '', latestCandidate, catalog)
+        : candidateData.explanation,
       provider,
       isAIPowered: provider === 'gemini',
       rawExplanation: candidateData.explanation,

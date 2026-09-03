@@ -216,6 +216,7 @@ export default function App() {
         content: data.explanation || data.candidate?.explanation || data.rawExplanation || "I've analyzed your input.",
         timestamp: new Date().toISOString(),
         candidate: data.candidate,
+        provider: data.provider === 'gemini' || data.provider === 'fallback' ? data.provider : undefined,
       };
 
       const finalChatList = [...newChatList, assistantMsg];

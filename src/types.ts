@@ -240,6 +240,7 @@ export interface AgentChatMessage {
   content: string;
   timestamp: string;
   candidate?: CandidateExtraction;
+  provider?: 'gemini' | 'fallback';
   calculatedOrder?: Partial<ResellerOrder>;
   hasActionCard?: boolean;
   actionCardType?: 'CONFIRM_ORDER' | 'NEED_DETAIL' | 'PAYMENT_VERIFIED' | 'LOSS_ALERT';
