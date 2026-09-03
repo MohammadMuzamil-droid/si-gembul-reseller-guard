@@ -1,6 +1,6 @@
 # Si Gembul — Bounded Security Hardening Evidence
 
-Date: 2026-09-03  
+Date: 2026-09-03
 Scope: Firebase ID-token protection for the Gemini interpretation API, browser-shipped demo-credential removal, and bounded error handling only.
 
 ## Preconditions
