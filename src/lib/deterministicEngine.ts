@@ -18,6 +18,54 @@ import {
 } from '../types';
 import { INITIAL_CATALOG } from '../data/mockData';
 
+function getCombinedCatalog(catalog: CatalogProduct[]): CatalogProduct[] {
+  const combinedCatalog: CatalogProduct[] = [...catalog];
+  for (const def of INITIAL_CATALOG) {
+    if (!combinedCatalog.some(p => p.sku.toLowerCase() === def.sku.toLowerCase())) {
+      combinedCatalog.push(def);
+    }
+  }
+  return combinedCatalog;
+}
+
+function matchesCatalogTerm(queryTerm: string, catalogTerm: string): boolean {
+  if (queryTerm === catalogTerm) return true;
+  if (queryTerm.length < 5 || catalogTerm.length < 5 || Math.abs(queryTerm.length - catalogTerm.length) > 1) return false;
+
+  let differences = 0;
+  for (let index = 0; index < Math.min(queryTerm.length, catalogTerm.length); index += 1) {
+    if (queryTerm[index] !== catalogTerm[index]) differences += 1;
+  }
+  return differences <= 1;
+}
+
+/**
+ * A partial product-family phrase (for example, "Arabica") is not enough to
+ * select a multi-word catalog variant. Quantities and units are ignored so
+ * this can be checked against the user's original product phrase.
+ */
+function isPartialCatalogVariantReference(query: string, catalog: CatalogProduct[]): boolean {
+  const queryTerms = (query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(term => term && !/^\d+$/.test(term) && !['pcs', 'pc', 'kg', 'pack', 'box', 'bks', 'bungkus'].includes(term));
+
+  if (queryTerms.length === 0) return false;
+
+  return getCombinedCatalog(catalog).some(product => {
+    const productTerms = product.name
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+
+    return queryTerms.length < productTerms.length && queryTerms.every(queryTerm =>
+      productTerms.some(catalogTerm => matchesCatalogTerm(queryTerm, catalogTerm))
+    );
+  });
+}
+
 /**
  * Robust Product Normalization & Catalog Matcher
  * Maps natural language product names and codes to authoritative catalog products.
@@ -28,12 +76,7 @@ export function normalizeProduct(
   catalog: CatalogProduct[] = []
 ): CatalogProduct | undefined {
   // Combine user's runtime catalog with standard catalog defaults to guarantee baseline resolution
-  const combinedCatalog: CatalogProduct[] = [...catalog];
-  for (const def of INITIAL_CATALOG) {
-    if (!combinedCatalog.some(p => p.sku.toLowerCase() === def.sku.toLowerCase())) {
-      combinedCatalog.push(def);
-    }
-  }
+  const combinedCatalog = getCombinedCatalog(catalog);
 
   const cleanQuery = (query || '')
     .toLowerCase()
@@ -49,10 +92,12 @@ export function normalizeProduct(
   }
 
   const hasKgQuantity = /(?:^|\s)\d+\s*kg\b/.test(cleanQuery);
+  const hasPartialVariantReference = isPartialCatalogVariantReference(cleanQuery, catalog);
 
   // 1. Direct SKU match, unless the user explicitly supplied a kg quantity.
-  // A weight expression is stronger evidence than an absent or stale extracted SKU.
-  if (!hasKgQuantity && candidateSku && candidateSku !== 'CUSTOM') {
+  // A weight expression or incomplete variant phrase is stronger evidence than
+  // an absent, stale, or over-specific extracted SKU.
+  if (!hasKgQuantity && !hasPartialVariantReference && candidateSku && candidateSku !== 'CUSTOM') {
     const skuMatch = combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
     if (skuMatch) return skuMatch;
   }
@@ -104,11 +149,13 @@ export function normalizeProduct(
   }
 
   // 4. Substring name or SKU match
-  const sub = combinedCatalog.find(p => {
-    const pName = p.name.toLowerCase();
-    const pSku = p.sku.toLowerCase();
-    return pName.includes(cleanQuery) || cleanQuery.includes(pName) || pSku.includes(cleanQuery);
-  });
+  const sub = hasPartialVariantReference
+    ? undefined
+    : combinedCatalog.find(p => {
+        const pName = p.name.toLowerCase();
+        const pSku = p.sku.toLowerCase();
+        return pName.includes(cleanQuery) || cleanQuery.includes(pName) || pSku.includes(cleanQuery);
+      });
   if (sub) return sub;
 
   return undefined;
@@ -248,28 +295,28 @@ export function matchItemsWithCatalog(
   bulkDiscountThreshold: number = 20
 ): OrderItem[] {
   // Pre-pass: Match items to products to determine total piece volume in this order
-  const matchedPairs: { item: CandidateExtraction['items'][0]; product?: CatalogProduct; qty: number }[] = [];
+  const matchedPairs: { item: CandidateExtraction['items'][0]; product?: CatalogProduct; qty: number; unresolvedVariant: boolean }[] = [];
   let totalOrderPieces = 0;
 
   for (const item of candidateItems) {
     const itemText = [item.productName, item.rawText].filter(Boolean).join(' ');
-    const matchedProduct = normalizeProduct(
-      itemText,
-      item.matchedSku,
-      catalog
-    );
+    const rawProduct = item.rawText ? normalizeProduct(item.rawText, undefined, catalog) : undefined;
+    const unresolvedVariant = !rawProduct && !!item.rawText && isPartialCatalogVariantReference(item.rawText, catalog);
+    const matchedProduct = rawProduct ?? (unresolvedVariant
+      ? undefined
+      : normalizeProduct(itemText, item.matchedSku, catalog));
 
     const qty = Math.max(1, Number(item.quantity) || 1);
     const pieceEquivalent = matchedProduct ? (matchedProduct.pieceEquivalent || 1) : 1;
     totalOrderPieces += qty * pieceEquivalent;
 
-    matchedPairs.push({ item, product: matchedProduct, qty });
+    matchedPairs.push({ item, product: matchedProduct, qty, unresolvedVariant });
   }
 
   const isBulkEligible = totalOrderPieces >= bulkDiscountThreshold;
   const result: OrderItem[] = [];
 
-  for (const { item, product, qty } of matchedPairs) {
+  for (const { item, product, qty, unresolvedVariant } of matchedPairs) {
     if (product) {
       // Calculate unit selling price (regular or bulk)
       let unitPrice = product.sellPrice;
@@ -293,11 +340,11 @@ export function matchItemsWithCatalog(
       });
     } else {
       // Unmatched fallback item
-      const unitPrice = item.suggestedUnitPrice ?? 0;
-      const baseCost = item.suggestedUnitCost ?? 0;
+      const unitPrice = unresolvedVariant ? 0 : (item.suggestedUnitPrice ?? 0);
+      const baseCost = unresolvedVariant ? 0 : (item.suggestedUnitCost ?? 0);
       result.push({
-        sku: item.matchedSku || `CUSTOM-${Date.now().toString().slice(-4)}`,
-        name: item.productName || item.rawText || 'Custom Item',
+        sku: unresolvedVariant ? `CUSTOM-${Date.now().toString().slice(-4)}` : (item.matchedSku || `CUSTOM-${Date.now().toString().slice(-4)}`),
+        name: unresolvedVariant ? item.rawText : (item.productName || item.rawText || 'Custom Item'),
         quantity: qty,
         unitPrice,
         baseCost,
