@@ -213,7 +213,7 @@ export default function App() {
       const assistantMsg: AgentChatMessage = {
         id: `msg_asst_${Date.now()}`,
         role: 'assistant',
-        content: data.candidate?.explanation || data.rawExplanation || "I've analyzed your input.",
+        content: data.explanation || data.candidate?.explanation || data.rawExplanation || "I've analyzed your input.",
         timestamp: new Date().toISOString(),
         candidate: data.candidate,
       };

@@ -34,6 +34,11 @@ function getGenAI(): GoogleGenAI | null {
 const EXTRACTION_SCHEMA: Schema = {
   type: Type.OBJECT,
   properties: {
+    responseMode: {
+      type: Type.STRING,
+      enum: ['TRANSACTION', 'CONVERSATION'],
+      description: 'TRANSACTION for a new or updated order candidate; CONVERSATION for a factual follow-up about prior context.'
+    },
     buyerName: { type: Type.STRING, description: 'Name, customer identifier, or reference code of the buyer ordering (e.g. "TEST-ISOLATION-A", "Rina Handayani")' },
     buyerPhone: { type: Type.STRING, description: 'Phone or WhatsApp number of buyer' },
     payerName: { type: Type.STRING, description: 'Name on the bank account or person paying' },
@@ -84,8 +89,72 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['items', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'items', 'confidence', 'explanation', 'ambiguities'],
 };
+
+function isConversationalQuestion(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  return /\?|\b(what|how|which|when|where|why|berapa|berapa banyak|jumlah|kuantitas|quantity|profit|laba|margin|sales|cogs|equivalent|setara)\b/.test(normalized);
+}
+
+function getLatestTransactionCandidate(conversationHistory: any[]): any | undefined {
+  return [...conversationHistory].reverse().find(turn =>
+    turn.role === 'assistant' && Array.isArray(turn.candidate?.items) && turn.candidate.items.length > 0
+  )?.candidate;
+}
+
+function isContextualUpdate(message: string, conversationHistory: any[]): boolean {
+  return !!getLatestTransactionCandidate(conversationHistory) &&
+    /\b(change|update|revise|modify|ubah|ganti|sekarang|now)\b/i.test(message);
+}
+
+function retainTransactionContext(updatedCandidate: any, previousCandidate: any): any {
+  return {
+    ...updatedCandidate,
+    buyerName: previousCandidate.buyerName,
+    buyerPhone: previousCandidate.buyerPhone,
+    payerName: previousCandidate.payerName,
+    payerBank: previousCandidate.payerBank,
+    payerAccount: previousCandidate.payerAccount,
+    recipientName: previousCandidate.recipientName,
+    recipientPhone: previousCandidate.recipientPhone,
+    recipientAddress: previousCandidate.recipientAddress,
+    recipientCity: previousCandidate.recipientCity,
+    paymentMethod: previousCandidate.paymentMethod,
+    courierName: previousCandidate.courierName,
+    quotedOngkir: previousCandidate.quotedOngkir,
+    buyerOngkir: previousCandidate.buyerOngkir,
+    sellerAbsorbedOngkir: previousCandidate.sellerAbsorbedOngkir,
+  };
+}
+
+function buildFallbackConversationReply(message: string, conversationHistory: any[]) {
+  const latestCandidate = getLatestTransactionCandidate(conversationHistory);
+  if (!latestCandidate) {
+    return {
+      responseMode: 'CONVERSATION',
+      explanation: 'I need a previous transaction in this chat before I can answer that follow-up.',
+    };
+  }
+
+  const items = latestCandidate.items as any[];
+  const itemSummary = items.map(item => {
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const pieceEquivalent = item.matchedSku?.endsWith('-1KG') ? 4 : 1;
+    const normalizedPieces = quantity * pieceEquivalent;
+    const unitLabel = pieceEquivalent > 1 ? 'kg' : 'pcs';
+    return `${quantity} ${unitLabel} ${item.productName} (${normalizedPieces} pcs equivalent)`;
+  }).join(', ');
+  const sales = items.reduce((total, item) => total + Math.max(1, Number(item.quantity) || 1) * Math.max(0, Number(item.suggestedUnitPrice) || 0), 0);
+  const cogs = items.reduce((total, item) => total + Math.max(1, Number(item.quantity) || 1) * Math.max(0, Number(item.suggestedUnitCost) || 0), 0);
+  const profit = sales - cogs;
+  const margin = sales > 0 ? Math.round((profit / sales) * 1000) / 10 : 0;
+
+  return {
+    responseMode: 'CONVERSATION',
+    explanation: `The most recent transaction was ${itemSummary}. Sales: Rp ${sales.toLocaleString('id-ID')}; COGS: Rp ${cogs.toLocaleString('id-ID')}; Profit: Rp ${profit.toLocaleString('id-ID')} (Margin: ${margin}%).`,
+  };
+}
 
 // Health Check API
 app.get('/api/health', (req: Request, res: Response) => {
@@ -152,7 +221,11 @@ Your mission:
 7. Si Gembul persona:
    - Supportive, calm, friendly, and operationally sharp.
    - Keep answers non-technical and easy for Indonesian micro-resellers.
-   - In 'explanation', summarize clearly what you detected ("Here's what I found...") and if any detail is needed ("I need one detail: ...").
+    - In 'explanation', summarize clearly what you detected ("Here's what I found...") and if any detail is needed ("I need one detail: ...").
+8. Distinguish a new or updated transaction from a conversational follow-up:
+    - For a question about prior chat context, return responseMode: "CONVERSATION", items: [], and answer from the supplied prior structured transaction context. Do not invent an empty order candidate.
+    - For a change to a prior transaction, return responseMode: "TRANSACTION" with the complete replacement candidate reflecting the latest requested state.
+    - For a clearly new transaction, return responseMode: "TRANSACTION" and do not merge it with an earlier order.
 
 Authoritative Reseller Product Catalog:
 ${catalogSummary}
@@ -166,9 +239,23 @@ Store Context:
     // Fallback if no Gemini API Key is configured
     if (!ai) {
       console.log('No Gemini API key available, using deterministic parser fallback.');
+      if (isConversationalQuestion(message || '')) {
+        const contextualReply = buildFallbackConversationReply(message || '', conversationHistory);
+        res.json({
+          ...contextualReply,
+          isAIPowered: false,
+          notice: 'Using bounded deterministic conversation context; Gemini reasoning is unavailable.',
+        });
+        return;
+      }
       const parsedCandidate = fallbackDeterministicParser(message, catalog);
+      const candidate = isContextualUpdate(message || '', conversationHistory)
+        ? retainTransactionContext(parsedCandidate, getLatestTransactionCandidate(conversationHistory))
+        : parsedCandidate;
       res.json({
-        candidate: parsedCandidate,
+        candidate,
+        responseMode: 'TRANSACTION',
+        explanation: candidate.explanation,
         isAIPowered: false,
         notice: 'Using deterministic parser (Set GEMINI_API_KEY for full AI multi-modal reasoning)',
       });
@@ -187,9 +274,12 @@ Store Context:
             parts: [{ text: turn.content }],
           });
         } else if (turn.role === 'assistant' && turn.content) {
+          const candidateContext = Array.isArray(turn.candidate?.items) && turn.candidate.items.length > 0
+            ? `\nStructured transaction context: ${JSON.stringify(turn.candidate)}`
+            : '';
           contents.push({
             role: 'model',
-            parts: [{ text: turn.content }],
+            parts: [{ text: `${turn.content}${candidateContext}` }],
           });
         }
       }
@@ -208,7 +298,7 @@ Store Context:
     }
 
     currentParts.push({
-      text: `Analyze this reseller chat/evidence and extract the structured transaction candidate:\n\n"${message || 'Uploaded payment/order evidence image'}"`,
+      text: `Respond to this latest reseller message using the bounded conversation context. Determine whether it is a new/updated transaction or a conversational follow-up.\n\n"${message || 'Uploaded payment/order evidence image'}"`,
     });
 
     contents.push({
@@ -237,8 +327,11 @@ Store Context:
       candidateData = fallbackDeterministicParser(message, catalog);
     }
 
+    const isConversation = candidateData.responseMode === 'CONVERSATION';
     res.json({
-      candidate: candidateData,
+      candidate: isConversation ? undefined : candidateData,
+      responseMode: candidateData.responseMode,
+      explanation: candidateData.explanation,
       isAIPowered: true,
       rawExplanation: candidateData.explanation,
     });
@@ -314,7 +407,8 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   }
 
   // 3. Extract Order section & parse ordered items
-  const orderSection = extractSection(text, ['order', 'pesanan', 'item', 'barang', 'produk', 'product']);
+  const labeledOrderSection = extractSection(text, ['order', 'pesanan', 'item', 'barang', 'produk', 'product']);
+  const orderSection = labeledOrderSection || (/\b(medium|premium|gayo|robusta|toraja|drip|madu|mete)\b/i.test(text) ? text : null);
   const matchedItems: any[] = [];
   const ambiguities: string[] = [];
 
@@ -368,11 +462,12 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     // Break order section by newlines or commas
     const itemChunks = orderSection.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
     for (const chunk of itemChunks) {
-      const itemMatch1 = chunk.match(/^(\d+)\s*(?:x|pcs|bks|bungkus|pack|box|cup|botol|can)?\s*(.+?)(?:\s*(?:@|harga|sebesar|rp)?\s*(?:rp\.?\s*)?([\d\.,]+))?$/i);
-      const itemMatch2 = chunk.match(/^(.+?)\s*(\d+)\s*(kg|pcs|bks|bungkus|pack|box|cup|botol|can)?$/i);
+      const parseChunk = chunk.replace(/[.!?]+$/, '').trim();
+      const itemMatch1 = parseChunk.match(/^(\d+)\s*(?:x|pcs|bks|bungkus|pack|box|cup|botol|can)?\s*(.+?)(?:\s*(?:@|harga|sebesar|rp)?\s*(?:rp\.?\s*)?([\d\.,]+))?$/i);
+      const itemMatch2 = parseChunk.match(/^(.+?)\s*(\d+)\s*(kg|pcs|bks|bungkus|pack|box|cup|botol|can)?$/i);
 
       let qty = 1;
-      let prodName = chunk;
+      let prodName = parseChunk;
       let explicitPrice: number | undefined = undefined;
 
       if (itemMatch1) {
