@@ -4,6 +4,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
@@ -742,9 +743,24 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    const indexPath = path.join(distPath, 'index.html');
+    const indexHtml = fs.readFileSync(indexPath);
+    // The SPA shell changes its hashed asset references on every build. Never serve a
+    // stale HTML shell after a Cloud Run deployment, while keeping hashed assets cacheable.
+    app.use('/assets', express.static(path.join(distPath, 'assets'), { immutable: true, maxAge: '1y' }));
+    app.use(express.static(distPath, { index: false }));
     app.get('*', (req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      const requestedPath = req.originalUrl.split('?')[0];
+      if (path.extname(requestedPath)) {
+        res.status(404).end();
+        return;
+      }
+      // `res.end` prevents Express from generating an ETag for the SPA shell.
+      // A stale shell could otherwise reference assets from a prior deployment.
+      res.status(200)
+        .set('Cache-Control', 'no-store, max-age=0')
+        .type('html')
+        .end(indexHtml);
     });
   }
 
