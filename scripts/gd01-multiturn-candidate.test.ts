@@ -28,6 +28,17 @@ const priorCandidate = {
   quotedOngkir: 0,
   buyerOngkir: 0,
   sellerAbsorbedOngkir: 0,
+  factStates: {
+    claimedPaymentAmount: 'UNSPECIFIED',
+    quotedOngkir: 'EXPLICIT_ZERO',
+    buyerOngkir: 'EXPLICIT_ZERO',
+    sellerAbsorbedOngkir: 'EXPLICIT_ZERO',
+  },
+  identityFactStates: {
+    buyerName: 'EXPLICIT_VALUE',
+    payerName: 'EXPLICIT_VALUE',
+    recipientName: 'EXPLICIT_VALUE',
+  },
   trackingNumber: undefined,
   items: [{ matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 2 pcs', productName: 'Premium coffee', quantity: 2 }],
   confidence: 0.95,
@@ -101,6 +112,71 @@ const resolvedShippingEvidence = resolveCandidateResponse({
 }, priorCandidate, 'Admin shipping evidence', true, INITIAL_CATALOG);
 assert.equal(resolvedShippingEvidence.candidate?.buyerOngkir, 18000);
 assert.equal(buildOrderFromCandidate(resolvedShippingEvidence.candidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-server-pipeline').financials.totalPayable, 68000);
+
+// D-01 contract-path fixture: this mirrors the parsed JSON returned by the
+// Gemini endpoint. The explanation is deliberately irrelevant to the result.
+const gd01CustomerContractResponse = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Ahmad Pratama',
+  recipientName: 'Rina Wulandari',
+  recipientAddress: 'Jl. Melati No. 10, Bandung',
+  paymentMethod: 'TRANSFER',
+  isPayerDifferentFromBuyer: true,
+  items: priorCandidate.items,
+  factStates: {
+    claimedPaymentAmount: 'UNSPECIFIED',
+    quotedOngkir: 'UNSPECIFIED',
+    buyerOngkir: 'UNSPECIFIED',
+    sellerAbsorbedOngkir: 'UNSPECIFIED',
+  },
+  identityFactStates: {
+    buyerName: 'EXPLICIT_VALUE',
+    payerName: 'EXPLICIT_VALUE',
+    recipientName: 'EXPLICIT_VALUE',
+  },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Buyer, payer, and recipient are identified.',
+}, undefined, '', true, INITIAL_CATALOG);
+assert.equal(gd01CustomerContractResponse.candidate?.buyerName, 'Siti Rahmawati');
+assert.equal(gd01CustomerContractResponse.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(gd01CustomerContractResponse.candidate?.recipientName, 'Rina Wulandari');
+assert.equal(gd01CustomerContractResponse.candidate?.structuredFactIssues?.length, 0);
+
+const gd01AdminContractResponse = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: priorCandidate.items,
+  courierName: 'J&T Express',
+  quotedOngkir: 18000,
+  buyerOngkir: 18000,
+  factStates: {
+    claimedPaymentAmount: 'UNSPECIFIED',
+    quotedOngkir: 'EXPLICIT_VALUE',
+    buyerOngkir: 'EXPLICIT_VALUE',
+    sellerAbsorbedOngkir: 'UNSPECIFIED',
+  },
+  identityFactStates: {
+    buyerName: 'UNSPECIFIED',
+    payerName: 'UNSPECIFIED',
+    recipientName: 'UNSPECIFIED',
+  },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping has been added.',
+}, gd01CustomerContractResponse.candidate, 'Admin shipping evidence', true, INITIAL_CATALOG);
+assert.equal(gd01AdminContractResponse.candidate?.buyerName, 'Siti Rahmawati');
+assert.equal(gd01AdminContractResponse.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(gd01AdminContractResponse.candidate?.recipientName, 'Rina Wulandari');
+assert.equal(gd01AdminContractResponse.candidate?.buyerOngkir, 18000);
+assert.equal(gd01AdminContractResponse.candidate?.factStates?.buyerOngkir, 'EXPLICIT_VALUE');
+const gd01ContractOrder = buildOrderFromCandidate(gd01AdminContractResponse.candidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-contract');
+assert.equal(gd01ContractOrder.financials.subtotal, 50000);
+assert.equal(gd01ContractOrder.financials.totalCOGS, 40000);
+assert.equal(gd01ContractOrder.financials.estimatedNetProfit, 10000);
+assert.equal(gd01ContractOrder.financials.totalPayable, 68000);
+assert.equal(gd01ContractOrder.financials.profitMarginPercent, 20);
+assert.equal(gd01ContractOrder.financials.hasLossWarning, false);
 
 // D-01: a model CONVERSATION response cannot erase an active candidate when image evidence arrives.
 const conversationModeEvidence = resolveCandidateResponse({
@@ -217,6 +293,58 @@ const missingPayer = prepareTransactionCandidate({
 }, INITIAL_CATALOG);
 assert.equal(missingPayer.payerName, undefined);
 assert.equal(buildOrderFromCandidate(missingPayer, INITIAL_CATALOG, DEFAULT_SETTINGS, 'missing-payer').payer.name, 'Payer not specified');
+
+// D-02c: an unsupported noisy later buyer must not replace an established
+// identity. This is not fuzzy correction: UNSPECIFIED means no replacement.
+const noisyBuyerUpdate = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Siti Rahmawanti',
+  items: priorCandidate.items,
+  factStates: {
+    claimedPaymentAmount: 'UNSPECIFIED',
+    quotedOngkir: 'UNSPECIFIED',
+    buyerOngkir: 'UNSPECIFIED',
+    sellerAbsorbedOngkir: 'UNSPECIFIED',
+  },
+  identityFactStates: {
+    buyerName: 'UNSPECIFIED',
+    payerName: 'UNSPECIFIED',
+    recipientName: 'UNSPECIFIED',
+  },
+  confidence: 0.9,
+  ambiguities: [],
+  explanation: 'A noisy spelling appears only in this summary.',
+}, priorCandidate, 'Admin evidence', true, INITIAL_CATALOG);
+assert.equal(noisyBuyerUpdate.candidate?.buyerName, 'Siti Rahmawati');
+assert.equal(noisyBuyerUpdate.candidate?.payerName, 'Ahmad Pratama');
+assert.ok((noisyBuyerUpdate.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('buyerName must be omitted')));
+assert.ok(getCandidateConfirmationBlockers(noisyBuyerUpdate.candidate, matchItemsWithCatalog(noisyBuyerUpdate.candidate.items, INITIAL_CATALOG, 20)).length > 0);
+
+// D-02d: server-side validation never recovers authority from explanation.
+const inconsistentStructuredResponse = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Customer A',
+  items: priorCandidate.items,
+  paymentMethod: 'TRANSFER',
+  factStates: {
+    claimedPaymentAmount: 'UNSPECIFIED',
+    quotedOngkir: 'EXPLICIT_VALUE',
+    buyerOngkir: 'UNSPECIFIED',
+    sellerAbsorbedOngkir: 'UNSPECIFIED',
+  },
+  identityFactStates: {
+    buyerName: 'EXPLICIT_VALUE',
+    payerName: 'EXPLICIT_VALUE',
+    recipientName: 'UNSPECIFIED',
+  },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'The payer is Ahmad Pratama and shipping is Rp18,000.',
+}, undefined, '', true, INITIAL_CATALOG);
+assert.equal(inconsistentStructuredResponse.candidate?.payerName, undefined);
+assert.equal(inconsistentStructuredResponse.candidate?.quotedOngkir, undefined);
+assert.ok((inconsistentStructuredResponse.candidate?.structuredFactIssues || []).length >= 2);
+assert.ok(getCandidateConfirmationBlockers(inconsistentStructuredResponse.candidate, matchItemsWithCatalog(inconsistentStructuredResponse.candidate.items, INITIAL_CATALOG, 20)).length > 0);
 
 // D-03: catalog products ignore receipt/AI prices; custom items remain priced from explicit human input.
 const catalogPricedItems = matchItemsWithCatalog([{

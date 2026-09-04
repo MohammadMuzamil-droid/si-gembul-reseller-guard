@@ -264,11 +264,13 @@ export interface CandidateExtraction {
    */
   factStates?: Partial<Record<'claimedPaymentAmount' | 'quotedOngkir' | 'buyerOngkir' | 'sellerAbsorbedOngkir', EvidenceFactState>>;
   /**
-   * Identity evidence must distinguish an omitted payer from a payer explicitly
-   * supplied by the latest chat or attachment. This protects a previously
-   * verified payer from an extractor's buyer-name fallback.
+   * Identity evidence distinguishes omitted identities from exact values in the
+   * latest chat or attachment. This preserves a prior buyer/payer/recipient
+   * when a later evidence turn does not explicitly replace that role.
    */
-  identityFactStates?: Partial<Record<'payerName', IdentityFactState>>;
+  identityFactStates?: Partial<Record<'buyerName' | 'payerName' | 'recipientName', IdentityFactState>>;
+  /** Server-detected extraction-contract inconsistencies that must block an unsafe confirmation. */
+  structuredFactIssues?: string[];
   confidence: number;
   ambiguities: string[];
   explanation: string;

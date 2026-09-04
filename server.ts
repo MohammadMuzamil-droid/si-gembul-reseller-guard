@@ -91,14 +91,18 @@ const EXTRACTION_SCHEMA: Schema = {
         buyerOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
         sellerAbsorbedOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
       },
-      description: 'State of each numeric evidence fact. Mark UNSPECIFIED and omit its numeric field when the latest evidence does not mention it.',
+      required: ['claimedPaymentAmount', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir'],
+      description: 'State of every numeric evidence fact. Mark UNSPECIFIED and omit its numeric field when the latest evidence does not mention it.',
     },
     identityFactStates: {
       type: Type.OBJECT,
       properties: {
+        buyerName: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_VALUE'] },
         payerName: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_VALUE'] },
+        recipientName: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_VALUE'] },
       },
-      description: 'Payer fact state from the latest evidence. Use EXPLICIT_VALUE only when the payer is actually named in that evidence. Otherwise use UNSPECIFIED and omit payerName.',
+      required: ['buyerName', 'payerName', 'recipientName'],
+      description: 'State of every identity fact from the latest evidence. Use EXPLICIT_VALUE only when that exact identity is legible in the latest evidence; otherwise use UNSPECIFIED and omit the matching name field.',
     },
     confidence: { type: Type.NUMBER, description: 'Confidence score from 0.0 to 1.0' },
     ambiguities: { 
@@ -111,7 +115,7 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['responseMode', 'items', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'items', 'factStates', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
 };
 
 function isConversationalQuestion(message: string): boolean {
@@ -265,6 +269,8 @@ const EVIDENCE_FACT_FIELDS = ['claimedPaymentAmount', 'quotedOngkir', 'buyerOngk
 type EvidenceFactField = typeof EVIDENCE_FACT_FIELDS[number];
 type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
 type IdentityFactState = 'UNSPECIFIED' | 'EXPLICIT_VALUE';
+const IDENTITY_FACT_FIELDS = ['buyerName', 'payerName', 'recipientName'] as const;
+type IdentityFactField = typeof IDENTITY_FACT_FIELDS[number];
 
 function isEvidenceFactField(field: string): field is EvidenceFactField {
   return (EVIDENCE_FACT_FIELDS as readonly string[]).includes(field);
@@ -278,10 +284,10 @@ function normalizeIdentityFactState(value: unknown): IdentityFactState | undefin
   return value === 'UNSPECIFIED' || value === 'EXPLICIT_VALUE' ? value : undefined;
 }
 
-function getPayerFactState(candidate: any): IdentityFactState {
-  const declared = normalizeIdentityFactState(candidate?.identityFactStates?.payerName);
+function getIdentityFactState(candidate: any, field: IdentityFactField): IdentityFactState {
+  const declared = normalizeIdentityFactState(candidate?.identityFactStates?.[field]);
   if (declared) return declared;
-  return typeof candidate?.payerName === 'string' && candidate.payerName.trim()
+  return typeof candidate?.[field] === 'string' && candidate[field].trim()
     ? 'EXPLICIT_VALUE'
     : 'UNSPECIFIED';
 }
@@ -299,12 +305,26 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   const factStates: Record<string, EvidenceFactState> = { ...(candidate.factStates || {}) };
   const identityFactStates: Record<string, IdentityFactState> = { ...(candidate.identityFactStates || {}) };
   const ambiguities = Array.isArray(candidate.ambiguities) ? [...candidate.ambiguities] : [];
+  const structuredFactIssues = Array.isArray(candidate.structuredFactIssues) ? [...candidate.structuredFactIssues] : [];
+  const addStructuredFactIssue = (issue: string) => {
+    if (!structuredFactIssues.includes(issue)) structuredFactIssues.push(issue);
+    if (!ambiguities.includes(issue)) ambiguities.push(issue);
+  };
 
   for (const field of EVIDENCE_FACT_FIELDS) {
+    const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field);
+    const hasRawValue = Object.prototype.hasOwnProperty.call(candidate, field);
     const state = getEvidenceFactState(candidate, field);
     const value = candidate[field];
     const hasFiniteValue = Number.isFinite(Number(value));
     factStates[field] = state;
+
+    if (candidate.factStates && !hasDeclaredState) {
+      addStructuredFactIssue(`${field} is missing its required evidence state.`);
+    }
+    if (state === 'UNSPECIFIED' && hasRawValue) {
+      addStructuredFactIssue(`${field} must not carry a numeric value when marked UNSPECIFIED.`);
+    }
 
     if (state === 'UNSPECIFIED') {
       delete candidate[field];
@@ -313,23 +333,41 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     if (!hasFiniteValue || (state === 'EXPLICIT_ZERO' && Number(value) !== 0) || (state === 'EXPLICIT_VALUE' && Number(value) <= 0)) {
       delete candidate[field];
       factStates[field] = 'UNSPECIFIED';
-      const issue = `${field} needs an explicit valid amount before it can affect the transaction.`;
-      if (!ambiguities.includes(issue)) ambiguities.push(issue);
+      addStructuredFactIssue(`${field} needs an explicit valid amount before it can affect the transaction.`);
       continue;
     }
     candidate[field] = Number(value);
   }
 
   candidate.factStates = factStates;
-  const payerFactState = getPayerFactState(candidate);
-  identityFactStates.payerName = payerFactState;
-  if (payerFactState === 'UNSPECIFIED') {
-    delete candidate.payerName;
-    delete candidate.isPayerDifferentFromBuyer;
-  } else {
-    candidate.payerName = candidate.payerName.trim();
+  for (const field of IDENTITY_FACT_FIELDS) {
+    const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.identityFactStates || {}, field);
+    const hasRawValue = Object.prototype.hasOwnProperty.call(candidate, field);
+    const state = getIdentityFactState(candidate, field);
+    identityFactStates[field] = state;
+
+    if (candidate.identityFactStates && !hasDeclaredState) {
+      addStructuredFactIssue(`${field} is missing its required identity evidence state.`);
+    }
+    if (state === 'UNSPECIFIED' && hasRawValue) {
+      addStructuredFactIssue(`${field} must be omitted when marked UNSPECIFIED.`);
+    }
+
+    if (state === 'UNSPECIFIED') {
+      delete candidate[field];
+      continue;
+    }
+    if (typeof candidate[field] !== 'string' || !candidate[field].trim()) {
+      delete candidate[field];
+      identityFactStates[field] = 'UNSPECIFIED';
+      addStructuredFactIssue(`${field} needs an exact evidence-supported value when marked EXPLICIT_VALUE.`);
+      continue;
+    }
+    candidate[field] = candidate[field].trim();
   }
+  if (identityFactStates.payerName === 'UNSPECIFIED') delete candidate.isPayerDifferentFromBuyer;
   candidate.identityFactStates = identityFactStates;
+  candidate.structuredFactIssues = structuredFactIssues;
   candidate.items = canonicalizeCandidateItems(Array.isArray(candidate.items) ? candidate.items : [], catalog);
   for (const item of candidate.items) {
     if (item.resolutionState === 'UNRESOLVED') {
@@ -362,24 +400,26 @@ function isPlaceholderBuyer(value: string): boolean {
   return value === 'pelanggan reseller' || value === 'customer' || value === 'unknown';
 }
 
-function isSafeShortFormOfIdentity(first: string, second: string): boolean {
-  const firstTerms = first.split(/\s+/).filter(Boolean);
-  const secondTerms = second.split(/\s+/).filter(Boolean);
-  return (firstTerms.length === 1 && secondTerms.length > 1 && firstTerms[0] === secondTerms[0]) ||
-    (secondTerms.length === 1 && firstTerms.length > 1 && secondTerms[0] === firstTerms[0]);
+function isClearlyNewTransaction(message: string, candidate: any, previousCandidate: any): boolean {
+  // A spelling variation alone is not sufficient evidence of a new order. A
+  // new transaction must be explicit in the current user turn so that noisy
+  // OCR/model extraction cannot replace an established buyer and discard the
+  // active candidate's supported context.
+  return /\b(new\s+(?:order|transaction)|order\s+baru|pesanan\s+baru|transaksi\s+baru)\b/i.test(message || '');
 }
 
-function isClearlyNewTransaction(message: string, candidate: any, previousCandidate: any): boolean {
-  if (/\b(new\s+(?:order|transaction)|order\s+baru|pesanan\s+baru|transaksi\s+baru)\b/i.test(message || '')) {
-    return true;
-  }
+function shouldPreservePreviousIdentity(field: IdentityFactField, updatedCandidate: any, previousCandidate: any): boolean {
+  const previousIdentity = normalizedIdentity(previousCandidate?.[field]);
+  if (!previousIdentity) return false;
 
-  const previousBuyer = normalizedIdentity(previousCandidate?.buyerName);
-  const updatedBuyer = normalizedIdentity(candidate?.buyerName);
-  return Boolean(
-    previousBuyer && updatedBuyer && !isPlaceholderBuyer(updatedBuyer) &&
-    previousBuyer !== updatedBuyer && !isSafeShortFormOfIdentity(previousBuyer, updatedBuyer)
-  );
+  const declaredState = normalizeIdentityFactState(updatedCandidate?.identityFactStates?.[field]);
+  if (declaredState === 'UNSPECIFIED') return true;
+  if (declaredState === 'EXPLICIT_VALUE') return false;
+
+  // Backward compatibility: old responses have no identity fact-state
+  // contract. An omitted identity remains omission, while a supplied identity
+  // is retained as an explicit legacy value without fuzzy name correction.
+  return !normalizedIdentity(updatedCandidate?.[field]);
 }
 
 function shouldPreservePreviousPayer(updatedCandidate: any, previousCandidate: any): boolean {
@@ -424,6 +464,12 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
 
   const mergedCandidate = { ...updatedCandidate };
+  for (const field of IDENTITY_FACT_FIELDS) {
+    if (shouldPreservePreviousIdentity(field, mergedCandidate, previousCandidate)) {
+      delete mergedCandidate[field];
+      mergedCandidate.identityFactStates = { ...(mergedCandidate.identityFactStates || {}), [field]: 'UNSPECIFIED' };
+    }
+  }
   if (shouldPreservePreviousPayer(mergedCandidate, previousCandidate)) {
     delete mergedCandidate.payerName;
     delete mergedCandidate.isPayerDifferentFromBuyer;
@@ -440,10 +486,10 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
       if (isEvidenceFactField(field)) {
         mergedCandidate.factStates = { ...(mergedCandidate.factStates || {}), [field]: getEvidenceFactState(previousCandidate, field) };
       }
-      if (field === 'payerName') {
-        // The final canonical candidate now carries an authoritative payer from
-        // prior context, so a second preparation pass must retain it.
-        mergedCandidate.identityFactStates = { ...(mergedCandidate.identityFactStates || {}), payerName: 'EXPLICIT_VALUE' };
+      if ((IDENTITY_FACT_FIELDS as readonly string[]).includes(field)) {
+        // The final canonical candidate now carries an authoritative identity
+        // retained from prior context, so the second preparation pass keeps it.
+        mergedCandidate.identityFactStates = { ...(mergedCandidate.identityFactStates || {}), [field]: 'EXPLICIT_VALUE' };
       }
     }
   }
@@ -554,7 +600,9 @@ Your mission:
    - Buyer: Person or reference code placing the order in chat.
    - Payer: Person paying the money (may be different, e.g. husband/parent/friend transfer).
    - Recipient: Delivery package receiver and physical shipping address.
-   - Return identityFactStates.payerName as EXPLICIT_VALUE only if the latest evidence actually names the payer. If it does not, set it to UNSPECIFIED and omit payerName. Never fill payerName with buyerName merely because the buyer is known, and never mark copied prior context as explicit new payer evidence.
+   - Return identityFactStates for buyerName, payerName, and recipientName on every response. Use EXPLICIT_VALUE only if the exact name is legible in the latest evidence; otherwise use UNSPECIFIED and omit that name field. Copy legible names exactly as written: never autocorrect, paraphrase, or replace a named identity with another role.
+   - Never fill payerName with buyerName merely because the buyer is known, and never mark copied prior context as explicit new payer evidence.
+   - A fact stated in explanation must already exist as a valid structured candidate fact. Explanation is a user-facing summary only; it is never a source for omitted candidate data.
 5. Distinguish payment types:
    - TRANSFER: Bank transfer / e-wallet.
    - COD: Regular courier expedition COD.
@@ -1007,7 +1055,11 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
       buyerOngkir: hasExplicitShippingAmount ? (buyerOngkir === 0 ? 'EXPLICIT_ZERO' : 'EXPLICIT_VALUE') : 'UNSPECIFIED',
       sellerAbsorbedOngkir: 'UNSPECIFIED',
     },
-    identityFactStates: { payerName: 'UNSPECIFIED' },
+    identityFactStates: {
+      buyerName: detectedName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+      payerName: 'UNSPECIFIED',
+      recipientName: detectedName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+    },
     confidence: 0.95,
     ambiguities,
     explanation: `Here's what I found from your message:\n- Buyer / Reference: ${detectedName}\n- ${matchedItems.map(i => `${i.quantity}x ${i.productName} (@ Rp ${(i.suggestedUnitPrice || 0).toLocaleString('id-ID')})`).join(', ')}\n- Payment: ${paymentMethod}${paymentAmount ? ` (Rp ${paymentAmount.toLocaleString('id-ID')})` : ''}${ambiguities.length > 0 ? `\n\nI need one detail:\n- ${ambiguities.join('\n- ')}` : ''}`,

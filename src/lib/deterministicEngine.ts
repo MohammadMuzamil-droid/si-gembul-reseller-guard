@@ -584,6 +584,10 @@ export function getCandidateConfirmationBlockers(
 ): string[] {
   const blockers: string[] = [];
 
+  for (const issue of candidate.structuredFactIssues || []) {
+    blockers.push(issue);
+  }
+
   if (!candidate.buyerName?.trim()) {
     blockers.push('Add a buyer name or customer reference.');
   }
