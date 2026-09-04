@@ -134,7 +134,7 @@ function getLatestTransactionCandidate(conversationHistory: any[]): any | undefi
   )?.candidate;
 }
 
-function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) {
+export function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) {
   const parsedItems = (candidate.items || []).map((item: any) => {
     const quantity = Math.max(1, Number(item.quantity) || 1);
     const catalogProduct = catalog.find(product => product.sku === item.matchedSku);
@@ -178,6 +178,28 @@ function buildStructuredTransactionContext(candidate: any, catalog: any[] = []) 
   const profit = sales - cogs;
 
   return {
+    transaction: {
+      buyerName: candidate.buyerName,
+      buyerPhone: candidate.buyerPhone,
+      payerName: candidate.payerName,
+      payerBank: candidate.payerBank,
+      payerAccount: candidate.payerAccount,
+      isPayerDifferentFromBuyer: candidate.isPayerDifferentFromBuyer,
+      recipientName: candidate.recipientName,
+      recipientPhone: candidate.recipientPhone,
+      recipientAddress: candidate.recipientAddress,
+      recipientCity: candidate.recipientCity,
+      isRecipientDifferentFromBuyer: candidate.isRecipientDifferentFromBuyer,
+      paymentMethod: candidate.paymentMethod,
+      claimedPaymentAmount: candidate.claimedPaymentAmount,
+      paymentProofClaimed: candidate.paymentProofClaimed,
+      transferReference: candidate.transferReference,
+      courierName: candidate.courierName,
+      quotedOngkir: candidate.quotedOngkir,
+      buyerOngkir: candidate.buyerOngkir,
+      sellerAbsorbedOngkir: candidate.sellerAbsorbedOngkir,
+      customerNotes: candidate.customerNotes,
+    },
     items,
     normalizedTotalPieces: parsedItems.reduce((total: number, item: any) => total + item.normalizedPieces, 0),
     isBulkEligible,
@@ -219,24 +241,51 @@ function isContextualUpdate(message: string, conversationHistory: any[]): boolea
     /\b(change|update|revise|modify|ubah|ganti|sekarang|now)\b/i.test(message);
 }
 
+const TRANSACTION_CONTEXT_FIELDS = [
+  'buyerName', 'buyerPhone',
+  'payerName', 'payerBank', 'payerAccount', 'isPayerDifferentFromBuyer',
+  'recipientName', 'recipientPhone', 'recipientAddress', 'recipientCity', 'isRecipientDifferentFromBuyer',
+  'paymentMethod', 'claimedPaymentAmount', 'paymentProofClaimed', 'transferReference',
+  'courierName', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir', 'customerNotes',
+] as const;
+
+function hasSupportedValue(candidate: any, field: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(candidate, field)) return false;
+  const value = candidate[field];
+  return value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '');
+}
+
+function normalizedIdentity(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isClearlyNewTransaction(message: string, candidate: any, previousCandidate: any): boolean {
+  if (/\b(new\s+(?:order|transaction)|order\s+baru|pesanan\s+baru|transaksi\s+baru)\b/i.test(message || '')) {
+    return true;
+  }
+
+  const previousBuyer = normalizedIdentity(previousCandidate?.buyerName);
+  const updatedBuyer = normalizedIdentity(candidate?.buyerName);
+  return Boolean(previousBuyer && updatedBuyer && previousBuyer !== updatedBuyer);
+}
+
+/** Preserve only omitted supported facts when a candidate continues the latest transaction. */
+export function retainOmittedTransactionContext(updatedCandidate: any, previousCandidate: any, message: string): any {
+  if (!previousCandidate || isClearlyNewTransaction(message, updatedCandidate, previousCandidate)) {
+    return updatedCandidate;
+  }
+
+  const mergedCandidate = { ...updatedCandidate };
+  for (const field of TRANSACTION_CONTEXT_FIELDS) {
+    if (!hasSupportedValue(mergedCandidate, field) && hasSupportedValue(previousCandidate, field)) {
+      mergedCandidate[field] = previousCandidate[field];
+    }
+  }
+  return mergedCandidate;
+}
+
 function retainTransactionContext(updatedCandidate: any, previousCandidate: any): any {
-  return {
-    ...updatedCandidate,
-    buyerName: previousCandidate.buyerName,
-    buyerPhone: previousCandidate.buyerPhone,
-    payerName: previousCandidate.payerName,
-    payerBank: previousCandidate.payerBank,
-    payerAccount: previousCandidate.payerAccount,
-    recipientName: previousCandidate.recipientName,
-    recipientPhone: previousCandidate.recipientPhone,
-    recipientAddress: previousCandidate.recipientAddress,
-    recipientCity: previousCandidate.recipientCity,
-    paymentMethod: previousCandidate.paymentMethod,
-    courierName: previousCandidate.courierName,
-    quotedOngkir: previousCandidate.quotedOngkir,
-    buyerOngkir: previousCandidate.buyerOngkir,
-    sellerAbsorbedOngkir: previousCandidate.sellerAbsorbedOngkir,
-  };
+  return retainOmittedTransactionContext(updatedCandidate, previousCandidate, 'update');
 }
 
 function buildFallbackConversationReply(message: string, conversationHistory: any[], catalog: any[] = []) {
@@ -326,8 +375,9 @@ Your mission:
     - In 'explanation', summarize clearly what you detected ("Here's what I found...") and if any detail is needed ("I need one detail: ...").
 8. Distinguish a new or updated transaction from a conversational follow-up:
     - For a question about prior chat context, return responseMode: "CONVERSATION", items: [], and answer from the supplied prior structured transaction context. Do not invent an empty order candidate.
-    - Structured transaction context includes originalQuantity/originalUnit and normalizedPieces. Treat normalizedPieces and financials as authoritative catalog-derived values; do not re-derive or conflate them from natural-language phrasing.
-    - For a change to a prior transaction, return responseMode: "TRANSACTION" with the complete replacement candidate reflecting the latest requested state.
+    - Structured transaction context includes transaction identities, payment and shipping facts, plus originalQuantity/originalUnit and normalizedPieces. Treat normalizedPieces and financials as authoritative catalog-derived values; do not re-derive or conflate them from natural-language phrasing.
+    - For a change to a prior transaction, return responseMode: "TRANSACTION" with a complete replacement candidate. Preserve every prior supported buyer, payer, recipient, payment, courier, and shipping fact unless the latest evidence explicitly changes it. Include those preserved facts in the structured candidate, not only in explanation prose.
+    - When the latest evidence changes or adds one fact, update only that fact. Explicit zero is a supported value for shipping. Do not omit known facts from the candidate, and do not state transaction facts in explanation that are absent from the candidate.
     - For a clearly new transaction, return responseMode: "TRANSACTION" and do not merge it with an earlier order.
 
 Authoritative Reseller Product Catalog:
@@ -437,8 +487,11 @@ Store Context:
     const latestCandidate = getLatestTransactionCandidate(conversationHistory);
     const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
     const isConversation = candidateData.responseMode === 'CONVERSATION' || usesAuthoritativeFacts;
+    const candidate = !isConversation && latestCandidate
+      ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
+      : candidateData;
     res.json({
-      candidate: isConversation ? undefined : candidateData,
+      candidate: isConversation ? undefined : candidate,
       responseMode: isConversation ? 'CONVERSATION' : candidateData.responseMode,
       explanation: usesAuthoritativeFacts
         ? buildAuthoritativeConversationReply(message || '', latestCandidate, catalog)
@@ -799,4 +852,6 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
