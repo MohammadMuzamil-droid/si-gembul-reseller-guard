@@ -592,7 +592,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
             </div>
           ) : (
             <div>
-              <div className="font-bold text-slate-900">{activeCand.payerName || activeCand.buyerName || 'Same as buyer'}</div>
+              <div className="font-bold text-slate-900">{activeCand.payerName || 'Payer not specified'}</div>
               <div className="text-slate-500">
                 {activeCand.payerBank ? `Bank ${activeCand.payerBank}` : 'Method: ' + (activeCand.paymentMethod || 'TRANSFER')}
               </div>

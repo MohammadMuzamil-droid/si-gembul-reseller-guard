@@ -269,10 +269,6 @@ export function calculateOrderFinancials(
   const profitMarginPercent = subtotal > 0
     ? Math.round((estimatedGrossProfit / subtotal) * 1000) / 10
     : 0;
-  const netProfitMarginPercent = subtotal > 0
-    ? Math.round((estimatedNetProfit / subtotal) * 1000) / 10
-    : 0;
-
   // Loss safeguard evaluation (strictly above configured threshold or negative/zero margin)
   let hasLossWarning = false;
   let lossWarningReason = '';
@@ -283,9 +279,9 @@ export function calculateOrderFinancials(
   } else if (subtotal > 0 && estimatedNetProfit <= 0) {
     hasLossWarning = true;
     lossWarningReason = `Loss Alert: Order produces a negative or zero profit (Net Profit: Rp ${estimatedNetProfit.toLocaleString('id-ID')}). Selling price is at or below supplier settlement or shipping subsidy is too high.`;
-  } else if (subtotal > 0 && netProfitMarginPercent < minProfitMarginThreshold) {
+  } else if (subtotal > 0 && profitMarginPercent < minProfitMarginThreshold) {
     hasLossWarning = true;
-    lossWarningReason = `Thin Margin Warning: Order net margin (${netProfitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
+    lossWarningReason = `Thin Margin Warning: Product margin (${profitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
   }
 
   return {
@@ -691,7 +687,7 @@ export function buildOrderFromCandidate(
       phone: candidate.buyerPhone || '',
     },
     payer: {
-      name: candidate.payerName || candidate.buyerName || 'Pelanggan Reseller',
+      name: candidate.payerName || 'Payer not specified',
       bankName: candidate.payerBank || '',
       accountNumber: candidate.payerAccount || '',
       transferReference: candidate.transferReference || '',

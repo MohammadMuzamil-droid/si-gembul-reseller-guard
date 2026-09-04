@@ -56,6 +56,7 @@ assert.equal(gd01Order.financials.totalCOGS, 40000);
 assert.equal(gd01Order.financials.estimatedNetProfit, 10000);
 assert.equal(gd01Order.financials.totalPayable, 68000);
 assert.equal(gd01Order.financials.profitMarginPercent, 20);
+assert.equal(gd01Order.financials.hasLossWarning, false);
 
 const structured = buildStructuredTransactionContext(shippingUpdate, INITIAL_CATALOG);
 assert.equal(structured.transaction.payerName, 'Ahmad Pratama');
@@ -153,12 +154,78 @@ const explicitPayerChange = retainOmittedTransactionContext({
 assert.equal(explicitPayerChange.payerName, 'Budi Santoso');
 assert.equal(explicitPayerChange.recipientName, 'Rina Wulandari');
 
+// D-02a: an omitted payer on later evidence cannot replace a previously
+// explicit, distinct payer with a buyer-name fallback.
+const omittedPayerUpdate = retainOmittedTransactionContext({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Siti Rahmawati',
+  identityFactStates: { payerName: 'UNSPECIFIED' },
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Admin shipping evidence.',
+}, priorCandidate, 'Shipping evidence');
+assert.equal(omittedPayerUpdate.payerName, 'Ahmad Pratama');
+assert.equal(omittedPayerUpdate.isPayerDifferentFromBuyer, true);
+const resolvedOmittedPayer = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Siti Rahmawati',
+  identityFactStates: { payerName: 'UNSPECIFIED' },
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Admin shipping evidence.',
+}, priorCandidate, 'Shipping evidence', true, INITIAL_CATALOG);
+assert.equal(resolvedOmittedPayer.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(resolvedOmittedPayer.candidate?.isPayerDifferentFromBuyer, true);
+
+// The compatibility guard gives the same protection if an older model response
+// carries buyer as payer but does not return the new identity fact state.
+const legacyBuyerPayerFallback = retainOmittedTransactionContext({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Siti Rahmawati',
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Admin shipping evidence.',
+}, priorCandidate, 'Shipping evidence');
+assert.equal(legacyBuyerPayerFallback.payerName, 'Ahmad Pratama');
+
+// D-02b: an explicitly named later payer wins, while a genuinely missing payer
+// stays unknown instead of being silently recorded as the buyer.
+const explicitPayerOverride = retainOmittedTransactionContext({
+  responseMode: 'TRANSACTION',
+  payerName: 'Budi Santoso',
+  identityFactStates: { payerName: 'EXPLICIT_VALUE' },
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Payer changed.',
+}, priorCandidate, 'Budi Santoso made the transfer');
+assert.equal(explicitPayerOverride.payerName, 'Budi Santoso');
+const missingPayer = prepareTransactionCandidate({
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Siti Rahmawati',
+  identityFactStates: { payerName: 'UNSPECIFIED' },
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Payer omitted.',
+}, INITIAL_CATALOG);
+assert.equal(missingPayer.payerName, undefined);
+assert.equal(buildOrderFromCandidate(missingPayer, INITIAL_CATALOG, DEFAULT_SETTINGS, 'missing-payer').payer.name, 'Payer not specified');
+
 // D-03: catalog products ignore receipt/AI prices; custom items remain priced from explicit human input.
 const catalogPricedItems = matchItemsWithCatalog([{
   matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 2 pcs', productName: 'Premium coffee', quantity: 2, suggestedUnitPrice: 34000,
 }], INITIAL_CATALOG, 20);
 assert.equal(catalogPricedItems[0].unitPrice, 25000);
-assert.equal(calculateOrderFinancials(catalogPricedItems, 18000, 18000).profitMarginPercent, 20);
+const gd01ShippingFinancials = calculateOrderFinancials(catalogPricedItems, 18000, 18000);
+assert.equal(gd01ShippingFinancials.profitMarginPercent, 20);
+assert.equal(gd01ShippingFinancials.hasLossWarning, false);
 
 // D-05: parsed tracking data survives merge and confirmed order construction.
 const fallbackShipping = fallbackDeterministicParser('Shipping J&T resi: NPX-DEMO-260903-18427', INITIAL_CATALOG);

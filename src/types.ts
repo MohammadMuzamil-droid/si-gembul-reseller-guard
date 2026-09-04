@@ -7,6 +7,7 @@ export type PaymentMethod = 'TRANSFER' | 'COD' | 'DIRECT_COD' | 'QRIS' | 'CASH';
 
 /** Whether a numeric fact was absent, explicitly zero, or explicitly provided. */
 export type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
+export type IdentityFactState = 'UNSPECIFIED' | 'EXPLICIT_VALUE';
 
 export type PaymentStatus = 
   | 'NEEDS_PROOF'     // Payment still needs proof
@@ -262,6 +263,12 @@ export interface CandidateExtraction {
    * deliberately stated zero. Older candidates without this remain supported.
    */
   factStates?: Partial<Record<'claimedPaymentAmount' | 'quotedOngkir' | 'buyerOngkir' | 'sellerAbsorbedOngkir', EvidenceFactState>>;
+  /**
+   * Identity evidence must distinguish an omitted payer from a payer explicitly
+   * supplied by the latest chat or attachment. This protects a previously
+   * verified payer from an extractor's buyer-name fallback.
+   */
+  identityFactStates?: Partial<Record<'payerName', IdentityFactState>>;
   confidence: number;
   ambiguities: string[];
   explanation: string;
