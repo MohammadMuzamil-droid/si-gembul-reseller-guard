@@ -11,6 +11,7 @@ import { GoogleGenAI, Type, Schema } from '@google/genai';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import dotenv from 'dotenv';
+import { canonicalizeCandidateItems } from './src/lib/deterministicEngine';
 
 dotenv.config();
 
@@ -77,11 +78,21 @@ const EXTRACTION_SCHEMA: Schema = {
     paymentProofClaimed: { type: Type.BOOLEAN, description: 'True if user says they already transferred or attached receipt' },
     transferReference: { type: Type.STRING, description: 'Transfer transaction ID / ref number' },
     courierName: { type: Type.STRING, description: 'Requested courier e.g. J&T Express, JNE, SiCepat, GoSend, Direct / Pickup' },
-    quotedOngkir: { type: Type.NUMBER, description: 'Estimated courier shipping fee in IDR (0 if not specified)' },
-    buyerOngkir: { type: Type.NUMBER, description: 'Shipping fee charged to buyer in IDR (0 if not specified)' },
-    sellerAbsorbedOngkir: { type: Type.NUMBER, description: 'Shipping fee absorbed by reseller in IDR' },
+    quotedOngkir: { type: Type.NUMBER, description: 'Estimated courier shipping fee in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
+    buyerOngkir: { type: Type.NUMBER, description: 'Shipping fee charged to buyer in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
+    sellerAbsorbedOngkir: { type: Type.NUMBER, description: 'Shipping fee absorbed by reseller in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
     trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
+    factStates: {
+      type: Type.OBJECT,
+      properties: {
+        claimedPaymentAmount: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+        quotedOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+        buyerOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+        sellerAbsorbedOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+      },
+      description: 'State of each numeric evidence fact. Mark UNSPECIFIED and omit its numeric field when the latest evidence does not mention it.',
+    },
     confidence: { type: Type.NUMBER, description: 'Confidence score from 0.0 to 1.0' },
     ambiguities: { 
       type: Type.ARRAY, 
@@ -243,7 +254,65 @@ const TRANSACTION_CONTEXT_FIELDS = [
   'courierName', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir', 'trackingNumber', 'customerNotes',
 ] as const;
 
+const EVIDENCE_FACT_FIELDS = ['claimedPaymentAmount', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir'] as const;
+type EvidenceFactField = typeof EVIDENCE_FACT_FIELDS[number];
+type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
+
+function isEvidenceFactField(field: string): field is EvidenceFactField {
+  return (EVIDENCE_FACT_FIELDS as readonly string[]).includes(field);
+}
+
+function normalizeEvidenceFactState(value: unknown): EvidenceFactState | undefined {
+  return value === 'UNSPECIFIED' || value === 'EXPLICIT_ZERO' || value === 'EXPLICIT_VALUE' ? value : undefined;
+}
+
+function getEvidenceFactState(candidate: any, field: EvidenceFactField): EvidenceFactState {
+  const declared = normalizeEvidenceFactState(candidate?.factStates?.[field]);
+  if (declared) return declared;
+  if (!Object.prototype.hasOwnProperty.call(candidate || {}, field) || !Number.isFinite(Number(candidate[field]))) return 'UNSPECIFIED';
+  return Number(candidate[field]) === 0 ? 'EXPLICIT_ZERO' : 'EXPLICIT_VALUE';
+}
+
+/** Normalize model numeric evidence without inferring values from narration. */
+export function prepareTransactionCandidate(candidateData: any, catalog: any[] = []): any {
+  const candidate = { ...(candidateData || {}) };
+  const factStates: Record<string, EvidenceFactState> = { ...(candidate.factStates || {}) };
+  const ambiguities = Array.isArray(candidate.ambiguities) ? [...candidate.ambiguities] : [];
+
+  for (const field of EVIDENCE_FACT_FIELDS) {
+    const state = getEvidenceFactState(candidate, field);
+    const value = candidate[field];
+    const hasFiniteValue = Number.isFinite(Number(value));
+    factStates[field] = state;
+
+    if (state === 'UNSPECIFIED') {
+      delete candidate[field];
+      continue;
+    }
+    if (!hasFiniteValue || (state === 'EXPLICIT_ZERO' && Number(value) !== 0) || (state === 'EXPLICIT_VALUE' && Number(value) <= 0)) {
+      delete candidate[field];
+      factStates[field] = 'UNSPECIFIED';
+      const issue = `${field} needs an explicit valid amount before it can affect the transaction.`;
+      if (!ambiguities.includes(issue)) ambiguities.push(issue);
+      continue;
+    }
+    candidate[field] = Number(value);
+  }
+
+  candidate.factStates = factStates;
+  candidate.items = canonicalizeCandidateItems(Array.isArray(candidate.items) ? candidate.items : [], catalog);
+  for (const item of candidate.items) {
+    if (item.resolutionState === 'UNRESOLVED') {
+      const issue = `Specific product variant is unresolved for "${item.rawText || item.productName}".`;
+      if (!ambiguities.includes(issue)) ambiguities.push(issue);
+    }
+  }
+  candidate.ambiguities = ambiguities;
+  return candidate;
+}
+
 function hasSupportedValue(candidate: any, field: string): boolean {
+  if (isEvidenceFactField(field) && getEvidenceFactState(candidate, field) === 'UNSPECIFIED') return false;
   if (!Object.prototype.hasOwnProperty.call(candidate, field)) return false;
   const value = candidate[field];
   return value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '');
@@ -313,6 +382,9 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   for (const field of TRANSACTION_CONTEXT_FIELDS) {
     if (!hasSupportedContextValue(mergedCandidate, field) && hasSupportedContextValue(previousCandidate, field)) {
       mergedCandidate[field] = previousCandidate[field];
+      if (isEvidenceFactField(field)) {
+        mergedCandidate.factStates = { ...(mergedCandidate.factStates || {}), [field]: getEvidenceFactState(previousCandidate, field) };
+      }
     }
   }
   return mergedCandidate;
@@ -328,15 +400,17 @@ export function resolveCandidateResponse(
   latestCandidate: any | undefined,
   message: string,
   hasImageEvidence: boolean,
+  catalog: any[] = [],
 ): { candidate: any | undefined; responseMode: 'TRANSACTION' | 'CONVERSATION'; usesAuthoritativeFacts: boolean } {
+  const preparedCandidate = prepareTransactionCandidate(candidateData, catalog);
   const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
-  const isEvidenceUpdate = !!latestCandidate && (hasImageEvidence || hasTransactionEvidenceFacts(candidateData));
-  const isConversation = !isEvidenceUpdate && (candidateData.responseMode === 'CONVERSATION' || usesAuthoritativeFacts);
+  const isEvidenceUpdate = !!latestCandidate && (hasImageEvidence || hasTransactionEvidenceFacts(preparedCandidate));
+  const isConversation = !isEvidenceUpdate && (preparedCandidate.responseMode === 'CONVERSATION' || usesAuthoritativeFacts);
   const candidate = !isConversation && latestCandidate
-    ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
-    : candidateData;
+    ? retainOmittedTransactionContext(preparedCandidate, latestCandidate, message || '')
+    : preparedCandidate;
   return {
-    candidate: isConversation ? undefined : candidate,
+    candidate: isConversation ? undefined : prepareTransactionCandidate(candidate, catalog),
     responseMode: isConversation ? 'CONVERSATION' : 'TRANSACTION',
     usesAuthoritativeFacts: usesAuthoritativeFacts && isConversation,
   };
@@ -412,7 +486,7 @@ Your mission:
    - Only if a product is truly custom and unrelated to coffee or the catalog (e.g. "Matcha Latte", "Kaos Polos", "Mug Keramik"), set matchedSku: "CUSTOM", preserve the exact product name, and note in ambiguities.
    - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
    - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
-   - If shipping or courier is NOT mentioned, set quotedOngkir: 0 and buyerOngkir: 0. Do not invent arbitrary shipping costs when none was specified.
+   - For claimedPaymentAmount, quotedOngkir, buyerOngkir, and sellerAbsorbedOngkir, use factStates. When the latest evidence does not mention a fact, set its factStates entry to UNSPECIFIED and OMIT its numeric field. Use EXPLICIT_ZERO only when the evidence explicitly says free/zero; use EXPLICIT_VALUE with the stated positive number. Never convert an unspecified fact into 0.
 4. Keep buyer, payer, and recipient as three distinct identities:
    - Buyer: Person or reference code placing the order in chat.
    - Payer: Person paying the money (may be different, e.g. husband/parent/friend transfer).
@@ -459,9 +533,8 @@ Store Context:
       }
       const parsedCandidate = fallbackDeterministicParser(message, catalog);
       const latestCandidate = getLatestTransactionCandidate(conversationHistory);
-      const candidate = latestCandidate
-        ? retainOmittedTransactionContext(parsedCandidate, latestCandidate, message || '')
-        : parsedCandidate;
+      const resolvedResponse = resolveCandidateResponse(parsedCandidate, latestCandidate, message || '', !!imageBase64, catalog);
+      const candidate = resolvedResponse.candidate || parsedCandidate;
       res.json({
         candidate,
         responseMode: 'TRANSACTION',
@@ -541,7 +614,7 @@ Store Context:
     }
 
     const latestCandidate = getLatestTransactionCandidate(conversationHistory);
-    const resolvedResponse = resolveCandidateResponse(candidateData, latestCandidate, message || '', !!imageBase64);
+    const resolvedResponse = resolveCandidateResponse(candidateData, latestCandidate, message || '', !!imageBase64, catalog);
     res.json({
       candidate: resolvedResponse.candidate,
       responseMode: resolvedResponse.responseMode,
@@ -815,6 +888,7 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   const trackingMatch = text.match(/(?:tracking|resi|no\.?\s*resi)\s*[:#-]?\s*([A-Z0-9-]{6,})/i);
   let quotedOngkir = 0;
   let buyerOngkir = 0;
+  const hasExplicitShippingAmount = /(?:ongkir|shipping)\s*(?:[:=-]\s*)?(?:(?:rp\.?|idr)\s*[\d.]+|gratis\b|free\b|0\b)/i.test(text);
 
   if (lower.includes('j&t') || lower.includes('jnt')) {
     courierName = 'J&T Express';
@@ -864,6 +938,12 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     buyerOngkir,
     sellerAbsorbedOngkir: 0,
     trackingNumber: trackingMatch?.[1],
+    factStates: {
+      claimedPaymentAmount: paymentAmount > 0 ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+      quotedOngkir: hasExplicitShippingAmount ? (quotedOngkir === 0 ? 'EXPLICIT_ZERO' : 'EXPLICIT_VALUE') : 'UNSPECIFIED',
+      buyerOngkir: hasExplicitShippingAmount ? (buyerOngkir === 0 ? 'EXPLICIT_ZERO' : 'EXPLICIT_VALUE') : 'UNSPECIFIED',
+      sellerAbsorbedOngkir: 'UNSPECIFIED',
+    },
     confidence: 0.95,
     ambiguities,
     explanation: `Here's what I found from your message:\n- Buyer / Reference: ${detectedName}\n- ${matchedItems.map(i => `${i.quantity}x ${i.productName} (@ Rp ${(i.suggestedUnitPrice || 0).toLocaleString('id-ID')})`).join(', ')}\n- Payment: ${paymentMethod}${paymentAmount ? ` (Rp ${paymentAmount.toLocaleString('id-ID')})` : ''}${ambiguities.length > 0 ? `\n\nI need one detail:\n- ${ambiguities.join('\n- ')}` : ''}`,

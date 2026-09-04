@@ -11,6 +11,7 @@ import {
   buildStructuredTransactionContext,
   fallbackDeterministicParser,
   getLatestTransactionCandidate,
+  prepareTransactionCandidate,
   resolveCandidateResponse,
   retainOmittedTransactionContext,
 } from '../server';
@@ -60,6 +61,45 @@ const structured = buildStructuredTransactionContext(shippingUpdate, INITIAL_CAT
 assert.equal(structured.transaction.payerName, 'Ahmad Pratama');
 assert.equal(structured.transaction.recipientName, 'Rina Wulandari');
 assert.equal(structured.transaction.buyerOngkir, 18000);
+
+// D-01a: evidence states preserve absent, explicit-zero, and explicit-value distinctly.
+const unspecifiedShipping = prepareTransactionCandidate({
+  ...priorCandidate,
+  quotedOngkir: 0,
+  buyerOngkir: 0,
+  factStates: { quotedOngkir: 'UNSPECIFIED', buyerOngkir: 'UNSPECIFIED' },
+}, INITIAL_CATALOG);
+assert.equal(unspecifiedShipping.quotedOngkir, undefined);
+assert.equal(unspecifiedShipping.buyerOngkir, undefined);
+const explicitZeroShipping = prepareTransactionCandidate({
+  ...priorCandidate,
+  quotedOngkir: 0,
+  buyerOngkir: 0,
+  factStates: { quotedOngkir: 'EXPLICIT_ZERO', buyerOngkir: 'EXPLICIT_ZERO' },
+}, INITIAL_CATALOG);
+assert.equal(explicitZeroShipping.quotedOngkir, 0);
+assert.equal(explicitZeroShipping.buyerOngkir, 0);
+const explicitValueShipping = prepareTransactionCandidate({
+  ...priorCandidate,
+  quotedOngkir: 18000,
+  buyerOngkir: 18000,
+  factStates: { quotedOngkir: 'EXPLICIT_VALUE', buyerOngkir: 'EXPLICIT_VALUE' },
+}, INITIAL_CATALOG);
+assert.equal(explicitValueShipping.buyerOngkir, 18000);
+
+const resolvedShippingEvidence = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: priorCandidate.items,
+  courierName: 'J&T Express',
+  quotedOngkir: 18000,
+  buyerOngkir: 18000,
+  factStates: { quotedOngkir: 'EXPLICIT_VALUE', buyerOngkir: 'EXPLICIT_VALUE' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping evidence added.',
+}, priorCandidate, 'Admin shipping evidence', true, INITIAL_CATALOG);
+assert.equal(resolvedShippingEvidence.candidate?.buyerOngkir, 18000);
+assert.equal(buildOrderFromCandidate(resolvedShippingEvidence.candidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-server-pipeline').financials.totalPayable, 68000);
 
 // D-01: a model CONVERSATION response cannot erase an active candidate when image evidence arrives.
 const conversationModeEvidence = resolveCandidateResponse({
@@ -126,6 +166,7 @@ const trackedCandidate = retainOmittedTransactionContext(fallbackShipping, shipp
 assert.equal(trackedCandidate.trackingNumber, 'NPX-DEMO-260903-18427');
 assert.equal(trackedCandidate.payerName, 'Ahmad Pratama');
 assert.equal(trackedCandidate.items[0].matchedSku, 'COFFEE-PREM-250');
+assert.equal(trackedCandidate.buyerOngkir, 18000);
 const trackedOrder = buildOrderFromCandidate(trackedCandidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-track');
 assert.equal(trackedOrder.shipping.trackingNumber, 'NPX-DEMO-260903-18427');
 
@@ -144,6 +185,53 @@ const gayoClarification = retainOmittedTransactionContext(
 const gayoItems = matchItemsWithCatalog(gayoClarification.items, INITIAL_CATALOG, 20);
 assert.equal(gayoItems[0].sku, 'KOPI-GAYO-250');
 assert.equal(gayoItems[0].quantity, 2);
+
+// D-06a: a generic original phrase wins over an over-specific model SKU and blocks persistence.
+const guardedArabica = prepareTransactionCandidate({
+  buyerName: 'Dimas Setiawan',
+  paymentMethod: 'TRANSFER',
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus ya', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  confidence: 0.9,
+  ambiguities: [],
+  explanation: 'Candidate.',
+}, INITIAL_CATALOG);
+assert.equal(guardedArabica.items[0].matchedSku, undefined);
+assert.equal(guardedArabica.items[0].resolutionState, 'UNRESOLVED');
+const guardedItems = matchItemsWithCatalog(guardedArabica.items, INITIAL_CATALOG, 20);
+assert.ok(getCandidateConfirmationBlockers(guardedArabica, guardedItems).length > 0);
+const resolvedInitialArabica = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  buyerName: 'Dimas Setiawan',
+  paymentMethod: 'TRANSFER',
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus ya', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  confidence: 0.9,
+  ambiguities: [],
+  explanation: 'Candidate.',
+}, undefined, '', true, INITIAL_CATALOG);
+assert.equal(resolvedInitialArabica.candidate?.items[0].resolutionState, 'UNRESOLVED');
+
+// D-06b: identical final lines cannot silently double deterministic money.
+const duplicateGayo = prepareTransactionCandidate({
+  items: [
+    { matchedSku: 'KOPI-GAYO-250', rawText: 'Gayo Premium 250gr 2 bungkus', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 },
+    { matchedSku: 'KOPI-GAYO-250', rawText: 'Gayo Premium 250gr 2 bungkus', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 },
+  ],
+  confidence: 0.9,
+  ambiguities: [],
+  explanation: 'Candidate.',
+}, INITIAL_CATALOG);
+assert.equal(duplicateGayo.items.length, 1);
+const duplicateGayoOrder = buildOrderFromCandidate({ ...duplicateGayo, buyerName: 'Dimas', paymentMethod: 'TRANSFER' }, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd02-duplicate');
+assert.equal(duplicateGayoOrder.financials.subtotal, 130000);
+assert.equal(duplicateGayoOrder.financials.totalCOGS, 90000);
+assert.equal(duplicateGayoOrder.financials.estimatedNetProfit, 40000);
+
+// D-06c: distinct catalog products remain distinct final lines.
+const distinctItems = matchItemsWithCatalog([
+  { rawText: 'Medium 2 pcs', productName: 'Medium', quantity: 2 },
+  { rawText: 'Premium 2 pcs', productName: 'Premium', quantity: 2 },
+], INITIAL_CATALOG, 20);
+assert.equal(distinctItems.length, 2);
 
 // D-07: a closed candidate is ignored as active context, including for a later same-buyer transaction.
 assert.equal(getLatestTransactionCandidate([

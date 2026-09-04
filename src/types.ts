@@ -5,6 +5,9 @@
 
 export type PaymentMethod = 'TRANSFER' | 'COD' | 'DIRECT_COD' | 'QRIS' | 'CASH';
 
+/** Whether a numeric fact was absent, explicitly zero, or explicitly provided. */
+export type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
+
 export type PaymentStatus = 
   | 'NEEDS_PROOF'     // Payment still needs proof
   | 'VERIFIED'        // Payment verified
@@ -236,6 +239,8 @@ export interface CandidateExtraction {
     rawText: string;
     productName: string;
     quantity: number;
+    /** Deterministic catalog-resolution state for a phrase supplied as evidence. */
+    resolutionState?: 'UNRESOLVED' | 'RESOLVED';
     suggestedUnitPrice?: number;
     suggestedUnitCost?: number;
   }[];
@@ -252,6 +257,11 @@ export interface CandidateExtraction {
   trackingNumber?: string;
   
   customerNotes?: string;
+  /**
+   * Numeric evidence must retain the difference between an omitted fact and a
+   * deliberately stated zero. Older candidates without this remain supported.
+   */
+  factStates?: Partial<Record<'claimedPaymentAmount' | 'quotedOngkir' | 'buyerOngkir' | 'sellerAbsorbedOngkir', EvidenceFactState>>;
   confidence: number;
   ambiguities: string[];
   explanation: string;

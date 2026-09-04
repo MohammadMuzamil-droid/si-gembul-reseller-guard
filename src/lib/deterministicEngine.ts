@@ -44,12 +44,12 @@ function matchesCatalogTerm(queryTerm: string, catalogTerm: string): boolean {
  * select a multi-word catalog variant. Quantities and units are ignored so
  * this can be checked against the user's original product phrase.
  */
-function isPartialCatalogVariantReference(query: string, catalog: CatalogProduct[]): boolean {
+export function isPartialCatalogVariantReference(query: string, catalog: CatalogProduct[]): boolean {
   const queryTerms = (query || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter(term => term && !/^\d+$/.test(term) && !['pcs', 'pc', 'kg', 'pack', 'box', 'bks', 'bungkus'].includes(term));
+    .filter(term => term && !/^\d+$/.test(term) && !['pcs', 'pc', 'kg', 'pack', 'box', 'bks', 'bungkus', 'ya', 'dong', 'tolong', 'mas', 'mbak'].includes(term));
 
   if (queryTerms.length === 0) return false;
 
@@ -64,6 +64,64 @@ function isPartialCatalogVariantReference(query: string, catalog: CatalogProduct
       productTerms.some(catalogTerm => matchesCatalogTerm(queryTerm, catalogTerm))
     );
   });
+}
+
+function normalizedCandidatePhrase(value: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Candidate items are final transaction lines, not every phrase Gemini saw in
+ * an image. Resolve from the original phrase first, and discard only an exact
+ * duplicate final line so repeated extraction cannot multiply money.
+ */
+export function canonicalizeCandidateItems(
+  candidateItems: CandidateExtraction['items'],
+  catalog: CatalogProduct[]
+): CandidateExtraction['items'] {
+  const seen = new Set<string>();
+  const canonicalItems: CandidateExtraction['items'] = [];
+
+  for (const item of candidateItems || []) {
+    const rawText = (item.rawText || item.productName || '').trim();
+    const product = rawText ? normalizeProduct(rawText, undefined, catalog) : undefined;
+    const unresolvedVariant = !!rawText && isPartialCatalogVariantReference(rawText, catalog) && !product;
+    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const canonicalItem = unresolvedVariant
+      ? {
+          ...item,
+          rawText,
+          productName: rawText || item.productName,
+          matchedSku: undefined,
+          resolutionState: 'UNRESOLVED' as const,
+          quantity,
+        }
+      : product
+        ? {
+            ...item,
+            rawText,
+            productName: product.name,
+            matchedSku: product.sku,
+            resolutionState: 'RESOLVED' as const,
+            quantity,
+          }
+        : { ...item, rawText, quantity };
+
+    // Identical resolved lines are one final order line, even when the model
+    // repeats a phrase in an evidence image. Distinct products remain distinct.
+    const duplicateKey = canonicalItem.matchedSku && canonicalItem.resolutionState === 'RESOLVED'
+      ? `RESOLVED|${canonicalItem.matchedSku}|${canonicalItem.quantity}`
+      : `RAW|${normalizedCandidatePhrase(canonicalItem.rawText || canonicalItem.productName)}|${canonicalItem.quantity}`;
+    if (seen.has(duplicateKey)) continue;
+    seen.add(duplicateKey);
+    canonicalItems.push(canonicalItem);
+  }
+
+  return canonicalItems;
 }
 
 /**
@@ -377,11 +435,12 @@ export function matchItemsWithCatalog(
   catalog: CatalogProduct[],
   bulkDiscountThreshold: number = 20
 ): OrderItem[] {
+  const canonicalItems = canonicalizeCandidateItems(candidateItems, catalog);
   // Pre-pass: Match items to products to determine total piece volume in this order
   const matchedPairs: { item: CandidateExtraction['items'][0]; product?: CatalogProduct; qty: number; unresolvedVariant: boolean }[] = [];
   let totalOrderPieces = 0;
 
-  for (const item of candidateItems) {
+  for (const item of canonicalItems) {
     const itemText = [item.productName, item.rawText].filter(Boolean).join(' ');
     const rawProduct = item.rawText ? normalizeProduct(item.rawText, undefined, catalog) : undefined;
     const unresolvedVariant = !rawProduct && !!item.rawText && isPartialCatalogVariantReference(item.rawText, catalog);
@@ -535,6 +594,12 @@ export function getCandidateConfirmationBlockers(
 
   if (!candidate.paymentMethod) {
     blockers.push('Choose a payment method.');
+  }
+
+  for (const ambiguity of candidate.ambiguities || []) {
+    if (/\b(unresolved|resolve|specific).*(product|variant)|\b(product|variant).*(unresolved|resolve)/i.test(ambiguity)) {
+      blockers.push(ambiguity);
+    }
   }
 
   if (items.length === 0) {
