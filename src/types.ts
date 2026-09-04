@@ -17,7 +17,8 @@ export type ShippingChargeTo = 'BUYER' | 'SELLER' | 'NOT_SPECIFIED';
 export interface ShippingEvidence {
   state: EvidenceFactState;
   amount?: number;
-  chargeTo: ShippingChargeTo;
+  /** Omitted for UNSPECIFIED shipping; required for a positive amount. */
+  chargeTo?: ShippingChargeTo;
 }
 
 export type PaymentStatus = 

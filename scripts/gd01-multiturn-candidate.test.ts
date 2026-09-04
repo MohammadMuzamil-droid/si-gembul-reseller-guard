@@ -125,11 +125,9 @@ const gd01CustomerContractResponse = resolveCandidateResponse({
   paymentMethod: 'TRANSFER',
   isPayerDifferentFromBuyer: true,
   items: priorCandidate.items,
+  shippingEvidence: { state: 'UNSPECIFIED' },
   factStates: {
     claimedPaymentAmount: 'UNSPECIFIED',
-    quotedOngkir: 'UNSPECIFIED',
-    buyerOngkir: 'UNSPECIFIED',
-    sellerAbsorbedOngkir: 'UNSPECIFIED',
   },
   identityFactStates: {
     buyerName: 'EXPLICIT_VALUE',
@@ -144,6 +142,7 @@ assert.equal(gd01CustomerContractResponse.candidate?.buyerName, 'Siti Rahmawati'
 assert.equal(gd01CustomerContractResponse.candidate?.payerName, 'Ahmad');
 assert.equal(gd01CustomerContractResponse.candidate?.recipientName, 'Rina Wulandari');
 assert.equal(gd01CustomerContractResponse.candidate?.structuredFactIssues?.length, 0);
+assert.deepEqual(gd01CustomerContractResponse.candidate?.shippingEvidence, { state: 'UNSPECIFIED' });
 
 const gd01AdminContractResponse = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
@@ -201,11 +200,19 @@ assert.equal(atomicExplicitZero.buyerOngkir, 0);
 assert.equal(atomicExplicitZero.factStates?.buyerOngkir, 'EXPLICIT_ZERO');
 const atomicUnspecified = prepareTransactionCandidate({
   ...priorCandidate,
-  shippingEvidence: { state: 'UNSPECIFIED', chargeTo: 'NOT_SPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
   factStates: { claimedPaymentAmount: 'UNSPECIFIED' },
 }, INITIAL_CATALOG);
 assert.equal(atomicUnspecified.buyerOngkir, undefined);
 assert.equal(atomicUnspecified.factStates?.buyerOngkir, 'UNSPECIFIED');
+assert.equal(atomicUnspecified.structuredFactIssues?.length, 0);
+const compatibilityUnspecified = prepareTransactionCandidate({
+  ...priorCandidate,
+  shippingEvidence: {},
+  factStates: { claimedPaymentAmount: 'UNSPECIFIED' },
+}, INITIAL_CATALOG);
+assert.deepEqual(compatibilityUnspecified.shippingEvidence, { state: 'UNSPECIFIED' });
+assert.equal(compatibilityUnspecified.structuredFactIssues?.length, 0);
 
 // The later NusaPay evidence, not customer/admin context, may enrich payer identity.
 const nusaPayPayerEnrichment = resolveCandidateResponse({
@@ -213,7 +220,7 @@ const nusaPayPayerEnrichment = resolveCandidateResponse({
   payerName: 'Ahmad Pratama',
   paymentMethod: 'TRANSFER',
   items: priorCandidate.items,
-  shippingEvidence: { state: 'UNSPECIFIED', chargeTo: 'NOT_SPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
   factStates: { claimedPaymentAmount: 'EXPLICIT_VALUE' },
   claimedPaymentAmount: 68000,
   identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'EXPLICIT_VALUE', recipientName: 'UNSPECIFIED' },

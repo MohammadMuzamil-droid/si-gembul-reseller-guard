@@ -85,8 +85,8 @@ const EXTRACTION_SCHEMA: Schema = {
         amount: { type: Type.NUMBER, description: 'IDR amount. Omit only when state is UNSPECIFIED.' },
         chargeTo: { type: Type.STRING, enum: ['BUYER', 'SELLER', 'NOT_SPECIFIED'] },
       },
-      required: ['state', 'chargeTo'],
-      description: 'One atomic shipping-evidence fact. EXPLICIT_VALUE requires a positive amount and BUYER or SELLER. EXPLICIT_ZERO requires amount 0. UNSPECIFIED omits amount and uses NOT_SPECIFIED.',
+      required: ['state'],
+      description: 'One atomic shipping-evidence fact. EXPLICIT_VALUE requires a positive amount and BUYER or SELLER. EXPLICIT_ZERO requires amount 0. UNSPECIFIED omits both amount and chargeTo.',
     },
     trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
@@ -319,9 +319,6 @@ function normalizeAtomicShippingEvidence(
   factStates: Record<string, EvidenceFactState>,
   addStructuredFactIssue: (issue: string) => void,
 ): void {
-  if (!Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence')) return;
-
-  const raw = candidate.shippingEvidence;
   const resetLegacyShipping = () => {
     delete candidate.quotedOngkir;
     delete candidate.buyerOngkir;
@@ -336,6 +333,23 @@ function normalizeAtomicShippingEvidence(
     addStructuredFactIssue(issue);
   };
 
+  const hasAtomicShipping = Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence');
+  const hasLegacyShippingContract = EVIDENCE_FACT_FIELDS
+    .filter(field => field !== 'claimedPaymentAmount')
+    .some(field => Object.prototype.hasOwnProperty.call(candidate, field) || Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field));
+  if (!hasAtomicShipping) {
+    // Older persisted/fallback candidates retain their flat shipping contract.
+    // A new structured response with no shipping facts is safely canonicalized
+    // as UNSPECIFIED rather than treated as a transaction error.
+    if (!hasLegacyShippingContract) {
+      resetLegacyShipping();
+      candidate.shippingEvidence = { state: 'UNSPECIFIED' };
+    }
+    return;
+  }
+
+  const raw = candidate.shippingEvidence;
+
   if (!raw || typeof raw !== 'object') {
     invalidate('Shipping evidence must use the structured state, amount, and charge-to contract.');
     return;
@@ -347,24 +361,36 @@ function normalizeAtomicShippingEvidence(
   const amount = Number(raw.amount);
   const hasValidAmount = Number.isFinite(amount);
 
-  if (!state || !chargeTo) {
+  // Some Gemini structured responses omit an otherwise empty nested object.
+  // This is compatible with the no-shipping-evidence state and never creates
+  // money or an allocation.
+  if (!state && !hasAmount && !chargeTo) {
+    resetLegacyShipping();
+    candidate.shippingEvidence = { state: 'UNSPECIFIED' };
+    return;
+  }
+  if (!state) {
+    invalidate('Shipping evidence has an invalid state.');
+    return;
+  }
+  if (raw.chargeTo !== undefined && !chargeTo) {
     invalidate('Shipping evidence has an invalid state or charge-to role.');
     return;
   }
   if (state === 'UNSPECIFIED') {
-    if (hasAmount || chargeTo !== 'NOT_SPECIFIED') {
+    if (hasAmount || (chargeTo && chargeTo !== 'NOT_SPECIFIED')) {
       invalidate('Unspecified shipping evidence must not carry an amount or allocation.');
       return;
     }
     resetLegacyShipping();
-    candidate.shippingEvidence = { state, chargeTo };
+    candidate.shippingEvidence = { state };
     return;
   }
   if (!hasValidAmount || (state === 'EXPLICIT_ZERO' && amount !== 0) || (state === 'EXPLICIT_VALUE' && amount <= 0)) {
     invalidate('Shipping evidence needs a valid explicit amount before it can affect the transaction.');
     return;
   }
-  if (state === 'EXPLICIT_VALUE' && chargeTo === 'NOT_SPECIFIED') {
+  if (state === 'EXPLICIT_VALUE' && (!chargeTo || chargeTo === 'NOT_SPECIFIED')) {
     invalidate('A positive shipping amount needs an explicit buyer or seller allocation.');
     return;
   }
@@ -549,7 +575,14 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
 
   const mergedCandidate = { ...updatedCandidate };
   if (mergedCandidate.shippingEvidence?.state === 'UNSPECIFIED' && previousCandidate.shippingEvidence?.state !== 'UNSPECIFIED') {
-    mergedCandidate.shippingEvidence = previousCandidate.shippingEvidence;
+    if (previousCandidate.shippingEvidence) {
+      mergedCandidate.shippingEvidence = previousCandidate.shippingEvidence;
+    } else {
+      // Preserve historical flat shipping facts through the existing context
+      // loop below. Keeping the new UNSPECIFIED wrapper here would otherwise
+      // erase a valid legacy buyer/seller amount during final normalization.
+      delete mergedCandidate.shippingEvidence;
+    }
   }
   for (const field of IDENTITY_FACT_FIELDS) {
     if (shouldPreservePreviousIdentity(field, mergedCandidate, previousCandidate)) {
@@ -699,7 +732,7 @@ Your mission:
    - Only if a product is truly custom and unrelated to coffee or the catalog (e.g. "Matcha Latte", "Kaos Polos", "Mug Keramik"), set matchedSku: "CUSTOM", preserve the exact product name, and note in ambiguities.
    - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
    - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
-   - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. Use UNSPECIFIED plus NOT_SPECIFIED when shipping is not evidenced. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
+   - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. When shipping is not evidenced, return state UNSPECIFIED and omit amount and chargeTo. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
 4. Keep buyer, payer, and recipient as three distinct identities:
    - Buyer: Person or reference code placing the order in chat.
    - Payer: Person paying the money (may be different, e.g. husband/parent/friend transfer).
