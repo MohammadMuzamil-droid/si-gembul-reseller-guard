@@ -14,6 +14,7 @@ import {
   prepareTransactionCandidate,
   resolveCandidateResponse,
   retainOmittedTransactionContext,
+  selectSafeAgentExplanation,
 } from '../server';
 
 const priorCandidate = {
@@ -118,7 +119,7 @@ assert.equal(buildOrderFromCandidate(resolvedShippingEvidence.candidate, INITIAL
 const gd01CustomerContractResponse = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
   buyerName: 'Siti Rahmawati',
-  payerName: 'Ahmad Pratama',
+  payerName: 'Ahmad',
   recipientName: 'Rina Wulandari',
   recipientAddress: 'Jl. Melati No. 10, Bandung',
   paymentMethod: 'TRANSFER',
@@ -140,21 +141,16 @@ const gd01CustomerContractResponse = resolveCandidateResponse({
   explanation: 'Buyer, payer, and recipient are identified.',
 }, undefined, '', true, INITIAL_CATALOG);
 assert.equal(gd01CustomerContractResponse.candidate?.buyerName, 'Siti Rahmawati');
-assert.equal(gd01CustomerContractResponse.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(gd01CustomerContractResponse.candidate?.payerName, 'Ahmad');
 assert.equal(gd01CustomerContractResponse.candidate?.recipientName, 'Rina Wulandari');
 assert.equal(gd01CustomerContractResponse.candidate?.structuredFactIssues?.length, 0);
 
 const gd01AdminContractResponse = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
   items: priorCandidate.items,
-  courierName: 'J&T Express',
-  quotedOngkir: 18000,
-  buyerOngkir: 18000,
+  shippingEvidence: { state: 'EXPLICIT_VALUE', amount: 18000, chargeTo: 'BUYER' },
   factStates: {
     claimedPaymentAmount: 'UNSPECIFIED',
-    quotedOngkir: 'EXPLICIT_VALUE',
-    buyerOngkir: 'EXPLICIT_VALUE',
-    sellerAbsorbedOngkir: 'UNSPECIFIED',
   },
   identityFactStates: {
     buyerName: 'UNSPECIFIED',
@@ -166,10 +162,11 @@ const gd01AdminContractResponse = resolveCandidateResponse({
   explanation: 'Shipping has been added.',
 }, gd01CustomerContractResponse.candidate, 'Admin shipping evidence', true, INITIAL_CATALOG);
 assert.equal(gd01AdminContractResponse.candidate?.buyerName, 'Siti Rahmawati');
-assert.equal(gd01AdminContractResponse.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(gd01AdminContractResponse.candidate?.payerName, 'Ahmad');
 assert.equal(gd01AdminContractResponse.candidate?.recipientName, 'Rina Wulandari');
 assert.equal(gd01AdminContractResponse.candidate?.buyerOngkir, 18000);
 assert.equal(gd01AdminContractResponse.candidate?.factStates?.buyerOngkir, 'EXPLICIT_VALUE');
+assert.deepEqual(gd01AdminContractResponse.candidate?.shippingEvidence, { state: 'EXPLICIT_VALUE', amount: 18000, chargeTo: 'BUYER' });
 const gd01ContractOrder = buildOrderFromCandidate(gd01AdminContractResponse.candidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-contract');
 assert.equal(gd01ContractOrder.financials.subtotal, 50000);
 assert.equal(gd01ContractOrder.financials.totalCOGS, 40000);
@@ -177,6 +174,54 @@ assert.equal(gd01ContractOrder.financials.estimatedNetProfit, 10000);
 assert.equal(gd01ContractOrder.financials.totalPayable, 68000);
 assert.equal(gd01ContractOrder.financials.profitMarginPercent, 20);
 assert.equal(gd01ContractOrder.financials.hasLossWarning, false);
+
+// A malformed atomic shipping response stays blocked and cannot surface model
+// prose as accepted financial truth.
+const invalidAtomicShipping = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: priorCandidate.items,
+  shippingEvidence: { state: 'EXPLICIT_VALUE', chargeTo: 'BUYER' },
+  factStates: { claimedPaymentAmount: 'UNSPECIFIED' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping is Rp18,000 and total customer payment is Rp68,000.',
+}, gd01CustomerContractResponse.candidate, 'Admin shipping evidence', true, INITIAL_CATALOG);
+assert.equal(invalidAtomicShipping.candidate?.buyerOngkir, undefined);
+assert.ok((invalidAtomicShipping.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('Shipping evidence needs a valid explicit amount')));
+assert.ok(getCandidateConfirmationBlockers(invalidAtomicShipping.candidate, matchItemsWithCatalog(invalidAtomicShipping.candidate.items, INITIAL_CATALOG, 20)).length > 0);
+assert.ok(!selectSafeAgentExplanation(invalidAtomicShipping, { explanation: 'Shipping is Rp18,000 and total customer payment is Rp68,000.' }, 'Admin shipping evidence', gd01CustomerContractResponse.candidate, INITIAL_CATALOG).includes('18,000'));
+
+const atomicExplicitZero = prepareTransactionCandidate({
+  ...priorCandidate,
+  shippingEvidence: { state: 'EXPLICIT_ZERO', amount: 0, chargeTo: 'BUYER' },
+  factStates: { claimedPaymentAmount: 'UNSPECIFIED' },
+}, INITIAL_CATALOG);
+assert.equal(atomicExplicitZero.buyerOngkir, 0);
+assert.equal(atomicExplicitZero.factStates?.buyerOngkir, 'EXPLICIT_ZERO');
+const atomicUnspecified = prepareTransactionCandidate({
+  ...priorCandidate,
+  shippingEvidence: { state: 'UNSPECIFIED', chargeTo: 'NOT_SPECIFIED' },
+  factStates: { claimedPaymentAmount: 'UNSPECIFIED' },
+}, INITIAL_CATALOG);
+assert.equal(atomicUnspecified.buyerOngkir, undefined);
+assert.equal(atomicUnspecified.factStates?.buyerOngkir, 'UNSPECIFIED');
+
+// The later NusaPay evidence, not customer/admin context, may enrich payer identity.
+const nusaPayPayerEnrichment = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  payerName: 'Ahmad Pratama',
+  paymentMethod: 'TRANSFER',
+  items: priorCandidate.items,
+  shippingEvidence: { state: 'UNSPECIFIED', chargeTo: 'NOT_SPECIFIED' },
+  factStates: { claimedPaymentAmount: 'EXPLICIT_VALUE' },
+  claimedPaymentAmount: 68000,
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'EXPLICIT_VALUE', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Payment evidence processed.',
+}, gd01AdminContractResponse.candidate, 'NusaPay payment evidence', true, INITIAL_CATALOG);
+assert.equal(nusaPayPayerEnrichment.candidate?.payerName, 'Ahmad Pratama');
 
 // D-01: a model CONVERSATION response cannot erase an active candidate when image evidence arrives.
 const conversationModeEvidence = resolveCandidateResponse({

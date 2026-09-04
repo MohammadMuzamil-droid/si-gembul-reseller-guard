@@ -78,21 +78,25 @@ const EXTRACTION_SCHEMA: Schema = {
     paymentProofClaimed: { type: Type.BOOLEAN, description: 'True if user says they already transferred or attached receipt' },
     transferReference: { type: Type.STRING, description: 'Transfer transaction ID / ref number' },
     courierName: { type: Type.STRING, description: 'Requested courier e.g. J&T Express, JNE, SiCepat, GoSend, Direct / Pickup' },
-    quotedOngkir: { type: Type.NUMBER, description: 'Estimated courier shipping fee in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
-    buyerOngkir: { type: Type.NUMBER, description: 'Shipping fee charged to buyer in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
-    sellerAbsorbedOngkir: { type: Type.NUMBER, description: 'Shipping fee absorbed by reseller in IDR. Omit when not mentioned; use 0 only when explicitly stated as free/zero.' },
+    shippingEvidence: {
+      type: Type.OBJECT,
+      properties: {
+        state: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+        amount: { type: Type.NUMBER, description: 'IDR amount. Omit only when state is UNSPECIFIED.' },
+        chargeTo: { type: Type.STRING, enum: ['BUYER', 'SELLER', 'NOT_SPECIFIED'] },
+      },
+      required: ['state', 'chargeTo'],
+      description: 'One atomic shipping-evidence fact. EXPLICIT_VALUE requires a positive amount and BUYER or SELLER. EXPLICIT_ZERO requires amount 0. UNSPECIFIED omits amount and uses NOT_SPECIFIED.',
+    },
     trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
     factStates: {
       type: Type.OBJECT,
       properties: {
         claimedPaymentAmount: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
-        quotedOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
-        buyerOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
-        sellerAbsorbedOngkir: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
       },
-      required: ['claimedPaymentAmount', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir'],
-      description: 'State of every numeric evidence fact. Mark UNSPECIFIED and omit its numeric field when the latest evidence does not mention it.',
+      required: ['claimedPaymentAmount'],
+      description: 'State of claimed payment evidence only. Shipping uses shippingEvidence, never separate flat state fields.',
     },
     identityFactStates: {
       type: Type.OBJECT,
@@ -115,7 +119,7 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['responseMode', 'items', 'factStates', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'items', 'shippingEvidence', 'factStates', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
 };
 
 function isConversationalQuestion(message: string): boolean {
@@ -215,6 +219,7 @@ export function buildStructuredTransactionContext(candidate: any, catalog: any[]
       paymentProofClaimed: candidate.paymentProofClaimed,
       transferReference: candidate.transferReference,
       courierName: candidate.courierName,
+      shippingEvidence: candidate.shippingEvidence,
       quotedOngkir: candidate.quotedOngkir,
       buyerOngkir: candidate.buyerOngkir,
       sellerAbsorbedOngkir: candidate.sellerAbsorbedOngkir,
@@ -269,6 +274,7 @@ const EVIDENCE_FACT_FIELDS = ['claimedPaymentAmount', 'quotedOngkir', 'buyerOngk
 type EvidenceFactField = typeof EVIDENCE_FACT_FIELDS[number];
 type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
 type IdentityFactState = 'UNSPECIFIED' | 'EXPLICIT_VALUE';
+type ShippingChargeTo = 'BUYER' | 'SELLER' | 'NOT_SPECIFIED';
 const IDENTITY_FACT_FIELDS = ['buyerName', 'payerName', 'recipientName'] as const;
 type IdentityFactField = typeof IDENTITY_FACT_FIELDS[number];
 
@@ -299,6 +305,81 @@ function getEvidenceFactState(candidate: any, field: EvidenceFactField): Evidenc
   return Number(candidate[field]) === 0 ? 'EXPLICIT_ZERO' : 'EXPLICIT_VALUE';
 }
 
+function normalizeShippingChargeTo(value: unknown): ShippingChargeTo | undefined {
+  return value === 'BUYER' || value === 'SELLER' || value === 'NOT_SPECIFIED' ? value : undefined;
+}
+
+/**
+ * Maps the single model-facing shipping fact into the established deterministic
+ * candidate fields. Legacy flat shipping fields remain supported for fallback
+ * parsing and historical candidates, but Gemini no longer produces them.
+ */
+function normalizeAtomicShippingEvidence(
+  candidate: any,
+  factStates: Record<string, EvidenceFactState>,
+  addStructuredFactIssue: (issue: string) => void,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence')) return;
+
+  const raw = candidate.shippingEvidence;
+  const resetLegacyShipping = () => {
+    delete candidate.quotedOngkir;
+    delete candidate.buyerOngkir;
+    delete candidate.sellerAbsorbedOngkir;
+    factStates.quotedOngkir = 'UNSPECIFIED';
+    factStates.buyerOngkir = 'UNSPECIFIED';
+    factStates.sellerAbsorbedOngkir = 'UNSPECIFIED';
+  };
+  const invalidate = (issue: string) => {
+    resetLegacyShipping();
+    candidate.shippingEvidence = { state: 'UNSPECIFIED', chargeTo: 'NOT_SPECIFIED' };
+    addStructuredFactIssue(issue);
+  };
+
+  if (!raw || typeof raw !== 'object') {
+    invalidate('Shipping evidence must use the structured state, amount, and charge-to contract.');
+    return;
+  }
+
+  const state = normalizeEvidenceFactState(raw.state);
+  const chargeTo = normalizeShippingChargeTo(raw.chargeTo);
+  const hasAmount = Object.prototype.hasOwnProperty.call(raw, 'amount');
+  const amount = Number(raw.amount);
+  const hasValidAmount = Number.isFinite(amount);
+
+  if (!state || !chargeTo) {
+    invalidate('Shipping evidence has an invalid state or charge-to role.');
+    return;
+  }
+  if (state === 'UNSPECIFIED') {
+    if (hasAmount || chargeTo !== 'NOT_SPECIFIED') {
+      invalidate('Unspecified shipping evidence must not carry an amount or allocation.');
+      return;
+    }
+    resetLegacyShipping();
+    candidate.shippingEvidence = { state, chargeTo };
+    return;
+  }
+  if (!hasValidAmount || (state === 'EXPLICIT_ZERO' && amount !== 0) || (state === 'EXPLICIT_VALUE' && amount <= 0)) {
+    invalidate('Shipping evidence needs a valid explicit amount before it can affect the transaction.');
+    return;
+  }
+  if (state === 'EXPLICIT_VALUE' && chargeTo === 'NOT_SPECIFIED') {
+    invalidate('A positive shipping amount needs an explicit buyer or seller allocation.');
+    return;
+  }
+
+  resetLegacyShipping();
+  candidate.shippingEvidence = { state, amount, chargeTo };
+  if (chargeTo === 'BUYER') {
+    candidate.buyerOngkir = amount;
+    factStates.buyerOngkir = state;
+  } else if (chargeTo === 'SELLER') {
+    candidate.sellerAbsorbedOngkir = amount;
+    factStates.sellerAbsorbedOngkir = state;
+  }
+}
+
 /** Normalize model numeric evidence without inferring values from narration. */
 export function prepareTransactionCandidate(candidateData: any, catalog: any[] = []): any {
   const candidate = { ...(candidateData || {}) };
@@ -311,6 +392,8 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     if (!ambiguities.includes(issue)) ambiguities.push(issue);
   };
 
+  normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
+
   for (const field of EVIDENCE_FACT_FIELDS) {
     const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field);
     const hasRawValue = Object.prototype.hasOwnProperty.call(candidate, field);
@@ -319,7 +402,8 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     const hasFiniteValue = Number.isFinite(Number(value));
     factStates[field] = state;
 
-    if (candidate.factStates && !hasDeclaredState) {
+    const isModernShippingFact = Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence') && field !== 'claimedPaymentAmount';
+    if (candidate.factStates && !hasDeclaredState && !isModernShippingFact) {
       addStructuredFactIssue(`${field} is missing its required evidence state.`);
     }
     if (state === 'UNSPECIFIED' && hasRawValue) {
@@ -464,6 +548,9 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
 
   const mergedCandidate = { ...updatedCandidate };
+  if (mergedCandidate.shippingEvidence?.state === 'UNSPECIFIED' && previousCandidate.shippingEvidence?.state !== 'UNSPECIFIED') {
+    mergedCandidate.shippingEvidence = previousCandidate.shippingEvidence;
+  }
   for (const field of IDENTITY_FACT_FIELDS) {
     if (shouldPreservePreviousIdentity(field, mergedCandidate, previousCandidate)) {
       delete mergedCandidate[field];
@@ -523,6 +610,23 @@ export function resolveCandidateResponse(
     responseMode: isConversation ? 'CONVERSATION' : 'TRANSACTION',
     usesAuthoritativeFacts: usesAuthoritativeFacts && isConversation,
   };
+}
+
+/** Do not present model prose as accepted money when structured evidence is invalid. */
+export function selectSafeAgentExplanation(
+  resolvedResponse: { candidate: any | undefined; usesAuthoritativeFacts: boolean },
+  candidateData: any,
+  message: string,
+  latestCandidate: any | undefined,
+  catalog: any[] = [],
+): string {
+  if (resolvedResponse.usesAuthoritativeFacts) {
+    return buildAuthoritativeConversationReply(message || '', latestCandidate, catalog);
+  }
+  if ((resolvedResponse.candidate?.structuredFactIssues || []).some((issue: string) => issue.toLowerCase().includes('shipping evidence'))) {
+    return 'I need one detail: please confirm the shipping fee and whether it is charged to the buyer or absorbed by the seller. No transaction was created.';
+  }
+  return candidateData.explanation;
 }
 
 function buildFallbackConversationReply(message: string, conversationHistory: any[], catalog: any[] = []) {
@@ -595,7 +699,7 @@ Your mission:
    - Only if a product is truly custom and unrelated to coffee or the catalog (e.g. "Matcha Latte", "Kaos Polos", "Mug Keramik"), set matchedSku: "CUSTOM", preserve the exact product name, and note in ambiguities.
    - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
    - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
-   - For claimedPaymentAmount, quotedOngkir, buyerOngkir, and sellerAbsorbedOngkir, use factStates. When the latest evidence does not mention a fact, set its factStates entry to UNSPECIFIED and OMIT its numeric field. Use EXPLICIT_ZERO only when the evidence explicitly says free/zero; use EXPLICIT_VALUE with the stated positive number. Never convert an unspecified fact into 0.
+   - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. Use UNSPECIFIED plus NOT_SPECIFIED when shipping is not evidenced. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
 4. Keep buyer, payer, and recipient as three distinct identities:
    - Buyer: Person or reference code placing the order in chat.
    - Payer: Person paying the money (may be different, e.g. husband/parent/friend transfer).
@@ -730,9 +834,7 @@ Store Context:
     res.json({
       candidate: resolvedResponse.candidate,
       responseMode: resolvedResponse.responseMode,
-      explanation: resolvedResponse.usesAuthoritativeFacts
-        ? buildAuthoritativeConversationReply(message || '', latestCandidate, catalog)
-        : candidateData.explanation,
+      explanation: selectSafeAgentExplanation(resolvedResponse, candidateData, message || '', latestCandidate, catalog),
       provider,
       isAIPowered: provider === 'gemini',
       rawExplanation: candidateData.explanation,

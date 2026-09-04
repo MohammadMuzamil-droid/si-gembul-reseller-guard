@@ -8,6 +8,17 @@ export type PaymentMethod = 'TRANSFER' | 'COD' | 'DIRECT_COD' | 'QRIS' | 'CASH';
 /** Whether a numeric fact was absent, explicitly zero, or explicitly provided. */
 export type EvidenceFactState = 'UNSPECIFIED' | 'EXPLICIT_ZERO' | 'EXPLICIT_VALUE';
 export type IdentityFactState = 'UNSPECIFIED' | 'EXPLICIT_VALUE';
+export type ShippingChargeTo = 'BUYER' | 'SELLER' | 'NOT_SPECIFIED';
+
+/**
+ * One evidence-grounded shipping fact. The amount is present only for an
+ * explicit value or explicit zero; it is never inferred from explanation prose.
+ */
+export interface ShippingEvidence {
+  state: EvidenceFactState;
+  amount?: number;
+  chargeTo: ShippingChargeTo;
+}
 
 export type PaymentStatus = 
   | 'NEEDS_PROOF'     // Payment still needs proof
@@ -252,6 +263,8 @@ export interface CandidateExtraction {
   transferReference?: string;
   
   courierName?: string;
+  /** Atomic Gemini evidence contract, normalized server-side into legacy fields below. */
+  shippingEvidence?: ShippingEvidence;
   quotedOngkir?: number;
   buyerOngkir?: number;
   sellerAbsorbedOngkir?: number;
