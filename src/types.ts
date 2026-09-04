@@ -106,7 +106,7 @@ export interface FinancialBreakdown {
   totalPayable: number;          // subtotal + buyerOngkir + otherFees - discount
   estimatedGrossProfit: number;  // subtotal - totalCOGS
   estimatedNetProfit: number;    // product profit minus the seller's unreimbursed shipping burden and adjustments
-  profitMarginPercent: number;   // (netProfit / totalPayable) * 100
+  profitMarginPercent: number;   // (product gross profit / product sales) * 100
   hasLossWarning: boolean;       // If net profit <= 0 or margin below safeguard
   lossWarningReason?: string;
 }
@@ -249,6 +249,7 @@ export interface CandidateExtraction {
   quotedOngkir?: number;
   buyerOngkir?: number;
   sellerAbsorbedOngkir?: number;
+  trackingNumber?: string;
   
   customerNotes?: string;
   confidence: number;
@@ -267,4 +268,5 @@ export interface AgentChatMessage {
   hasActionCard?: boolean;
   actionCardType?: 'CONFIRM_ORDER' | 'NEED_DETAIL' | 'PAYMENT_VERIFIED' | 'LOSS_ALERT';
   attachedImageUrl?: string;
+  transactionClosed?: boolean;
 }

@@ -93,11 +93,13 @@ export function normalizeProduct(
 
   const hasKgQuantity = /(?:^|\s)\d+\s*kg\b/.test(cleanQuery);
   const hasPartialVariantReference = isPartialCatalogVariantReference(cleanQuery, catalog);
+  // A named origin/variant is stronger evidence than a generic extracted SKU.
+  const hasSpecificCatalogKeyword = cleanQuery.includes('gayo');
 
   // 1. Direct SKU match, unless the user explicitly supplied a kg quantity.
   // A weight expression or incomplete variant phrase is stronger evidence than
   // an absent, stale, or over-specific extracted SKU.
-  if (!hasKgQuantity && !hasPartialVariantReference && candidateSku && candidateSku !== 'CUSTOM') {
+  if (!hasKgQuantity && !hasPartialVariantReference && !hasSpecificCatalogKeyword && candidateSku && candidateSku !== 'CUSTOM') {
     const skuMatch = combinedCatalog.find(p => p.sku.toLowerCase() === candidateSku.toLowerCase());
     if (skuMatch) return skuMatch;
   }
@@ -114,6 +116,10 @@ export function normalizeProduct(
   const isMedium = cleanQuery.includes('medium') || cleanQuery.includes('med ');
   const isPremium = cleanQuery.includes('premium') || cleanQuery.includes('prem ') || cleanQuery.includes('specialty');
 
+  if (cleanQuery.includes('gayo')) {
+    const p = combinedCatalog.find(p => p.sku === 'KOPI-GAYO-250');
+    if (p) return p;
+  }
   if (isMedium && is1kg) {
     const p = combinedCatalog.find(p => p.sku === 'COFFEE-MED-1KG');
     if (p) return p;
@@ -131,10 +137,6 @@ export function normalizeProduct(
     if (p) return p;
   }
 
-  if (cleanQuery.includes('gayo')) {
-    const p = combinedCatalog.find(p => p.sku === 'KOPI-GAYO-250');
-    if (p) return p;
-  }
   if (cleanQuery.includes('robusta') || cleanQuery.includes('lampung')) {
     const p = combinedCatalog.find(p => p.sku === 'KOPI-ROB-200');
     if (p) return p;
@@ -205,9 +207,12 @@ export function calculateOrderFinancials(
   const sellerShippingBurden = Math.max(0, safeQuotedOngkir - safeBuyerOngkir) + safeSellerAbsorbed;
   const estimatedNetProfit = estimatedGrossProfit - sellerShippingBurden - safeDiscount + safeOtherFees;
 
-  // Profit Margin Percentage relative to total sales
-  const profitMarginPercent = totalPayable > 0 
-    ? Math.round((estimatedNetProfit / totalPayable) * 1000) / 10 
+  // Product margin is deliberately independent from shipping collection or subsidy.
+  const profitMarginPercent = subtotal > 0
+    ? Math.round((estimatedGrossProfit / subtotal) * 1000) / 10
+    : 0;
+  const netProfitMarginPercent = subtotal > 0
+    ? Math.round((estimatedNetProfit / subtotal) * 1000) / 10
     : 0;
 
   // Loss safeguard evaluation (strictly above configured threshold or negative/zero margin)
@@ -220,9 +225,9 @@ export function calculateOrderFinancials(
   } else if (subtotal > 0 && estimatedNetProfit <= 0) {
     hasLossWarning = true;
     lossWarningReason = `Loss Alert: Order produces a negative or zero profit (Net Profit: Rp ${estimatedNetProfit.toLocaleString('id-ID')}). Selling price is at or below supplier settlement or shipping subsidy is too high.`;
-  } else if (subtotal > 0 && profitMarginPercent < minProfitMarginThreshold) {
+  } else if (subtotal > 0 && netProfitMarginPercent < minProfitMarginThreshold) {
     hasLossWarning = true;
-    lossWarningReason = `Thin Margin Warning: Order profit margin (${profitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
+    lossWarningReason = `Thin Margin Warning: Order net margin (${netProfitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
   }
 
   return {
@@ -400,9 +405,6 @@ export function matchItemsWithCatalog(
       let unitPrice = product.sellPrice;
       if (isBulkEligible && product.bulkPrice) {
         unitPrice = product.bulkPrice;
-      }
-      if (item.suggestedUnitPrice !== undefined && item.suggestedUnitPrice > 0 && item.suggestedUnitPrice !== product.sellPrice && item.suggestedUnitPrice !== product.bulkPrice) {
-        unitPrice = item.suggestedUnitPrice;
       }
 
       const baseCost = product.baseCost;
@@ -654,6 +656,7 @@ export function buildOrderFromCandidate(
       quotedOngkir,
       buyerOngkir,
       sellerAbsorbedOngkir,
+      trackingNumber: candidate.trackingNumber || undefined,
     },
     shippingStatus: initialShippingStatus,
     needsConfirmation: exceptions.needsConfirmation,

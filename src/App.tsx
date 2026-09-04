@@ -301,6 +301,22 @@ export default function App() {
     setActiveTab('orders');
   };
 
+  // Preserve the transcript while closing its active candidate. This creates a
+  // lifecycle boundary for later transactions without deleting evidence history.
+  const handleTransactionCompleted = async () => {
+    if (!currentUser) return;
+    let closed = false;
+    const nextChat = [...chatHistory].reverse().map(message => {
+      if (!closed && message.role === 'assistant' && message.candidate && !message.transactionClosed) {
+        closed = true;
+        return { ...message, transactionClosed: true };
+      }
+      return message;
+    }).reverse();
+    setChatHistory(nextChat);
+    await saveUserChatHistory(currentUser.uid, nextChat);
+  };
+
   // Update existing order
   const handleUpdateOrder = async (updated: ResellerOrder) => {
     if (!currentUser) return;
@@ -518,6 +534,7 @@ export default function App() {
               chatHistory={chatHistory}
               onSendMessage={handleSendChatMessage}
               onOrderCreated={handleOrderCreated}
+              onTransactionCompleted={handleTransactionCompleted}
               onClearChat={handleClearChat}
               onUpdateMessageCandidate={handleUpdateMessageCandidate}
               isProcessing={isAgentProcessing}

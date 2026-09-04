@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
-import { buildOrderFromCandidate } from '../src/lib/deterministicEngine';
+import {
+  buildOrderFromCandidate,
+  calculateOrderFinancials,
+  getCandidateConfirmationBlockers,
+  matchItemsWithCatalog,
+  normalizeProduct,
+} from '../src/lib/deterministicEngine';
 import { INITIAL_CATALOG, DEFAULT_SETTINGS } from '../src/data/mockData';
-import { buildStructuredTransactionContext, retainOmittedTransactionContext } from '../server';
+import {
+  buildStructuredTransactionContext,
+  fallbackDeterministicParser,
+  getLatestTransactionCandidate,
+  resolveCandidateResponse,
+  retainOmittedTransactionContext,
+} from '../server';
 
 const priorCandidate = {
   buyerName: 'Siti Rahmawati',
@@ -15,6 +27,7 @@ const priorCandidate = {
   quotedOngkir: 0,
   buyerOngkir: 0,
   sellerAbsorbedOngkir: 0,
+  trackingNumber: undefined,
   items: [{ matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 2 pcs', productName: 'Premium coffee', quantity: 2 }],
   confidence: 0.95,
   ambiguities: [],
@@ -41,11 +54,35 @@ assert.equal(gd01Order.financials.subtotal, 50000);
 assert.equal(gd01Order.financials.totalCOGS, 40000);
 assert.equal(gd01Order.financials.estimatedNetProfit, 10000);
 assert.equal(gd01Order.financials.totalPayable, 68000);
+assert.equal(gd01Order.financials.profitMarginPercent, 20);
 
 const structured = buildStructuredTransactionContext(shippingUpdate, INITIAL_CATALOG);
 assert.equal(structured.transaction.payerName, 'Ahmad Pratama');
 assert.equal(structured.transaction.recipientName, 'Rina Wulandari');
 assert.equal(structured.transaction.buyerOngkir, 18000);
+
+// D-01: a model CONVERSATION response cannot erase an active candidate when image evidence arrives.
+const conversationModeEvidence = resolveCandidateResponse({
+  responseMode: 'CONVERSATION',
+  items: [],
+  confidence: 0.9,
+  ambiguities: [],
+  explanation: 'Shipping evidence reviewed.',
+}, shippingUpdate, '', true);
+assert.equal(conversationModeEvidence.responseMode, 'TRANSACTION');
+assert.equal(conversationModeEvidence.candidate?.buyerName, 'Siti Rahmawati');
+assert.equal(conversationModeEvidence.candidate?.buyerOngkir, 18000);
+
+// D-02: a one-token form is continuity-safe only when it exactly matches the active buyer's first name.
+const shortBuyerUpdate = retainOmittedTransactionContext({
+  buyerName: 'Siti',
+  items: priorCandidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Short-form buyer update.',
+}, priorCandidate, 'Siti confirms the delivery');
+assert.equal(shortBuyerUpdate.payerName, 'Ahmad Pratama');
+assert.equal(shortBuyerUpdate.recipientName, 'Rina Wulandari');
 
 const newTransaction = retainOmittedTransactionContext({
   responseMode: 'TRANSACTION',
@@ -76,4 +113,41 @@ const explicitPayerChange = retainOmittedTransactionContext({
 assert.equal(explicitPayerChange.payerName, 'Budi Santoso');
 assert.equal(explicitPayerChange.recipientName, 'Rina Wulandari');
 
-console.log('GD-01 multi-turn candidate preservation tests: PASS');
+// D-03: catalog products ignore receipt/AI prices; custom items remain priced from explicit human input.
+const catalogPricedItems = matchItemsWithCatalog([{
+  matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 2 pcs', productName: 'Premium coffee', quantity: 2, suggestedUnitPrice: 34000,
+}], INITIAL_CATALOG, 20);
+assert.equal(catalogPricedItems[0].unitPrice, 25000);
+assert.equal(calculateOrderFinancials(catalogPricedItems, 18000, 18000).profitMarginPercent, 20);
+
+// D-05: parsed tracking data survives merge and confirmed order construction.
+const fallbackShipping = fallbackDeterministicParser('Shipping J&T resi: NPX-DEMO-260903-18427', INITIAL_CATALOG);
+const trackedCandidate = retainOmittedTransactionContext(fallbackShipping, shippingUpdate, 'Shipping evidence');
+assert.equal(trackedCandidate.trackingNumber, 'NPX-DEMO-260903-18427');
+assert.equal(trackedCandidate.payerName, 'Ahmad Pratama');
+assert.equal(trackedCandidate.items[0].matchedSku, 'COFFEE-PREM-250');
+const trackedOrder = buildOrderFromCandidate(trackedCandidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'gd01-track');
+assert.equal(trackedOrder.shipping.trackingNumber, 'NPX-DEMO-260903-18427');
+
+// D-06: an explicit Gayo phrase wins over generic Premium and preserves prior quantity.
+const unresolvedArabicaItems = matchItemsWithCatalog([{
+  rawText: 'Arabica 2 bungkus', productName: 'Arabica', quantity: 2,
+}], INITIAL_CATALOG, 20);
+assert.equal(unresolvedArabicaItems[0].unitPrice, 0);
+assert.ok(getCandidateConfirmationBlockers({ buyerName: 'Dimas Setiawan', paymentMethod: 'TRANSFER', recipientAddress: '', courierName: 'Direct / Pickup', items: [{ rawText: 'Arabica 2 bungkus', productName: 'Arabica', quantity: 2 }], confidence: 1, ambiguities: ['Specific Arabica variant is unresolved.'], explanation: '' }, unresolvedArabicaItems).length > 0);
+assert.equal(normalizeProduct('Yang Gayo Premium 250gr.', 'COFFEE-PREM-250', INITIAL_CATALOG)?.sku, 'KOPI-GAYO-250');
+const gayoClarification = retainOmittedTransactionContext(
+  fallbackDeterministicParser('Yang Gayo Premium 250gr.', INITIAL_CATALOG),
+  { buyerName: 'Dimas Setiawan', items: [{ rawText: 'Arabica 2 bungkus', productName: 'Arabica', quantity: 2 }], confidence: 1, ambiguities: ['Specific Arabica variant is unresolved.'], explanation: '' },
+  'Yang Gayo Premium 250gr.',
+);
+const gayoItems = matchItemsWithCatalog(gayoClarification.items, INITIAL_CATALOG, 20);
+assert.equal(gayoItems[0].sku, 'KOPI-GAYO-250');
+assert.equal(gayoItems[0].quantity, 2);
+
+// D-07: a closed candidate is ignored as active context, including for a later same-buyer transaction.
+assert.equal(getLatestTransactionCandidate([
+  { role: 'assistant', candidate: priorCandidate, transactionClosed: true },
+]), undefined);
+
+console.log('Run B focused multi-turn, financial authority, tracking, and Gayo resolution tests: PASS');

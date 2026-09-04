@@ -80,6 +80,7 @@ const EXTRACTION_SCHEMA: Schema = {
     quotedOngkir: { type: Type.NUMBER, description: 'Estimated courier shipping fee in IDR (0 if not specified)' },
     buyerOngkir: { type: Type.NUMBER, description: 'Shipping fee charged to buyer in IDR (0 if not specified)' },
     sellerAbsorbedOngkir: { type: Type.NUMBER, description: 'Shipping fee absorbed by reseller in IDR' },
+    trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
     confidence: { type: Type.NUMBER, description: 'Confidence score from 0.0 to 1.0' },
     ambiguities: { 
@@ -128,9 +129,9 @@ async function verifyFirebaseRequest(req: Request, res: Response): Promise<boole
   }
 }
 
-function getLatestTransactionCandidate(conversationHistory: any[]): any | undefined {
+export function getLatestTransactionCandidate(conversationHistory: any[]): any | undefined {
   return [...conversationHistory].reverse().find(turn =>
-    turn.role === 'assistant' && Array.isArray(turn.candidate?.items) && turn.candidate.items.length > 0
+    turn.role === 'assistant' && !turn.transactionClosed && Array.isArray(turn.candidate?.items) && turn.candidate.items.length > 0
   )?.candidate;
 }
 
@@ -159,9 +160,6 @@ export function buildStructuredTransactionContext(candidate: any, catalog: any[]
     let unitPrice = item.catalogProduct?.sellPrice ?? suggestedUnitPrice;
     if (isBulkEligible && item.catalogProduct?.bulkPrice) {
       unitPrice = item.catalogProduct.bulkPrice;
-    }
-    if (suggestedUnitPrice > 0 && suggestedUnitPrice !== item.catalogProduct?.sellPrice && suggestedUnitPrice !== item.catalogProduct?.bulkPrice) {
-      unitPrice = suggestedUnitPrice;
     }
     const unitCost = item.catalogProduct?.baseCost ?? Math.max(0, Number(sourceItem.suggestedUnitCost) || 0);
     const { catalogProduct, ...contextItem } = item;
@@ -198,6 +196,7 @@ export function buildStructuredTransactionContext(candidate: any, catalog: any[]
       quotedOngkir: candidate.quotedOngkir,
       buyerOngkir: candidate.buyerOngkir,
       sellerAbsorbedOngkir: candidate.sellerAbsorbedOngkir,
+      trackingNumber: candidate.trackingNumber,
       customerNotes: candidate.customerNotes,
     },
     items,
@@ -236,17 +235,12 @@ function buildAuthoritativeConversationReply(message: string, candidate: any, ca
   return facts.join(' ');
 }
 
-function isContextualUpdate(message: string, conversationHistory: any[]): boolean {
-  return !!getLatestTransactionCandidate(conversationHistory) &&
-    /\b(change|update|revise|modify|ubah|ganti|sekarang|now)\b/i.test(message);
-}
-
 const TRANSACTION_CONTEXT_FIELDS = [
   'buyerName', 'buyerPhone',
   'payerName', 'payerBank', 'payerAccount', 'isPayerDifferentFromBuyer',
   'recipientName', 'recipientPhone', 'recipientAddress', 'recipientCity', 'isRecipientDifferentFromBuyer',
   'paymentMethod', 'claimedPaymentAmount', 'paymentProofClaimed', 'transferReference',
-  'courierName', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir', 'customerNotes',
+  'courierName', 'quotedOngkir', 'buyerOngkir', 'sellerAbsorbedOngkir', 'trackingNumber', 'customerNotes',
 ] as const;
 
 function hasSupportedValue(candidate: any, field: string): boolean {
@@ -255,8 +249,25 @@ function hasSupportedValue(candidate: any, field: string): boolean {
   return value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '');
 }
 
+function hasSupportedContextValue(candidate: any, field: string): boolean {
+  if (!hasSupportedValue(candidate, field)) return false;
+  const identityFields = ['buyerName', 'payerName', 'recipientName'];
+  return !identityFields.includes(field) || !isPlaceholderBuyer(normalizedIdentity(candidate[field]));
+}
+
 function normalizedIdentity(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function isPlaceholderBuyer(value: string): boolean {
+  return value === 'pelanggan reseller' || value === 'customer' || value === 'unknown';
+}
+
+function isSafeShortFormOfIdentity(first: string, second: string): boolean {
+  const firstTerms = first.split(/\s+/).filter(Boolean);
+  const secondTerms = second.split(/\s+/).filter(Boolean);
+  return (firstTerms.length === 1 && secondTerms.length > 1 && firstTerms[0] === secondTerms[0]) ||
+    (secondTerms.length === 1 && firstTerms.length > 1 && secondTerms[0] === firstTerms[0]);
 }
 
 function isClearlyNewTransaction(message: string, candidate: any, previousCandidate: any): boolean {
@@ -266,7 +277,25 @@ function isClearlyNewTransaction(message: string, candidate: any, previousCandid
 
   const previousBuyer = normalizedIdentity(previousCandidate?.buyerName);
   const updatedBuyer = normalizedIdentity(candidate?.buyerName);
-  return Boolean(previousBuyer && updatedBuyer && previousBuyer !== updatedBuyer);
+  return Boolean(
+    previousBuyer && updatedBuyer && !isPlaceholderBuyer(updatedBuyer) &&
+    previousBuyer !== updatedBuyer && !isSafeShortFormOfIdentity(previousBuyer, updatedBuyer)
+  );
+}
+
+function candidateHasExplicitQuantity(item: any): boolean {
+  return /(?:^|\s)\d+\s*(?:x|pcs?|bks|bungkus|pack|box|kg)?\b/i.test(`${item?.rawText || ''} ${item?.productName || ''}`);
+}
+
+function retainOmittedItemQuantity(updatedItems: any[], previousItems: any[]): any[] {
+  if (updatedItems.length !== 1 || previousItems.length !== 1 || candidateHasExplicitQuantity(updatedItems[0])) {
+    return updatedItems;
+  }
+  return [{ ...updatedItems[0], quantity: previousItems[0].quantity }];
+}
+
+function isFallbackPlaceholderItemSet(items: any[]): boolean {
+  return items.length === 1 && items[0]?.matchedSku === 'CUSTOM' && items[0]?.productName === 'Custom Item';
 }
 
 /** Preserve only omitted supported facts when a candidate continues the latest transaction. */
@@ -276,16 +305,41 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
 
   const mergedCandidate = { ...updatedCandidate };
+  if ((!Array.isArray(mergedCandidate.items) || mergedCandidate.items.length === 0 || isFallbackPlaceholderItemSet(mergedCandidate.items)) && Array.isArray(previousCandidate.items)) {
+    mergedCandidate.items = previousCandidate.items;
+  } else if (Array.isArray(mergedCandidate.items) && Array.isArray(previousCandidate.items)) {
+    mergedCandidate.items = retainOmittedItemQuantity(mergedCandidate.items, previousCandidate.items);
+  }
   for (const field of TRANSACTION_CONTEXT_FIELDS) {
-    if (!hasSupportedValue(mergedCandidate, field) && hasSupportedValue(previousCandidate, field)) {
+    if (!hasSupportedContextValue(mergedCandidate, field) && hasSupportedContextValue(previousCandidate, field)) {
       mergedCandidate[field] = previousCandidate[field];
     }
   }
   return mergedCandidate;
 }
 
-function retainTransactionContext(updatedCandidate: any, previousCandidate: any): any {
-  return retainOmittedTransactionContext(updatedCandidate, previousCandidate, 'update');
+function hasTransactionEvidenceFacts(candidate: any): boolean {
+  if (Array.isArray(candidate?.items) && candidate.items.length > 0) return true;
+  return TRANSACTION_CONTEXT_FIELDS.some(field => hasSupportedValue(candidate, field));
+}
+
+export function resolveCandidateResponse(
+  candidateData: any,
+  latestCandidate: any | undefined,
+  message: string,
+  hasImageEvidence: boolean,
+): { candidate: any | undefined; responseMode: 'TRANSACTION' | 'CONVERSATION'; usesAuthoritativeFacts: boolean } {
+  const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
+  const isEvidenceUpdate = !!latestCandidate && (hasImageEvidence || hasTransactionEvidenceFacts(candidateData));
+  const isConversation = !isEvidenceUpdate && (candidateData.responseMode === 'CONVERSATION' || usesAuthoritativeFacts);
+  const candidate = !isConversation && latestCandidate
+    ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
+    : candidateData;
+  return {
+    candidate: isConversation ? undefined : candidate,
+    responseMode: isConversation ? 'CONVERSATION' : 'TRANSACTION',
+    usesAuthoritativeFacts: usesAuthoritativeFacts && isConversation,
+  };
 }
 
 function buildFallbackConversationReply(message: string, conversationHistory: any[], catalog: any[] = []) {
@@ -356,7 +410,8 @@ Your mission:
      * "Medium 1kg", "Medium 1 kg" -> map to SKU: "COFFEE-MED-1KG" (Sell Price: Rp 60,000, Base Cost: Rp 40,000).
      * "Premium 1kg", "Premium 1 kg" -> map to SKU: "COFFEE-PREM-1KG" (Sell Price: Rp 100,000, Base Cost: Rp 80,000).
    - Only if a product is truly custom and unrelated to coffee or the catalog (e.g. "Matcha Latte", "Kaos Polos", "Mug Keramik"), set matchedSku: "CUSTOM", preserve the exact product name, and note in ambiguities.
-   - Derive the unit price from the total payment amount if specified (e.g. 2 units for Rp 30,000 -> suggestedUnitPrice: 15000).
+   - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
+   - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
    - If shipping or courier is NOT mentioned, set quotedOngkir: 0 and buyerOngkir: 0. Do not invent arbitrary shipping costs when none was specified.
 4. Keep buyer, payer, and recipient as three distinct identities:
    - Buyer: Person or reference code placing the order in chat.
@@ -392,7 +447,7 @@ Store Context:
     // Fallback if no Gemini API Key is configured
     if (!ai) {
       console.log('No Gemini API key available, using deterministic parser fallback.');
-      if (isConversationalQuestion(message || '')) {
+      if (isConversationalQuestion(message || '') && !imageBase64) {
         const contextualReply = buildFallbackConversationReply(message || '', conversationHistory, catalog);
         res.json({
           ...contextualReply,
@@ -403,8 +458,9 @@ Store Context:
         return;
       }
       const parsedCandidate = fallbackDeterministicParser(message, catalog);
-      const candidate = isContextualUpdate(message || '', conversationHistory)
-        ? retainTransactionContext(parsedCandidate, getLatestTransactionCandidate(conversationHistory))
+      const latestCandidate = getLatestTransactionCandidate(conversationHistory);
+      const candidate = latestCandidate
+        ? retainOmittedTransactionContext(parsedCandidate, latestCandidate, message || '')
         : parsedCandidate;
       res.json({
         candidate,
@@ -485,15 +541,11 @@ Store Context:
     }
 
     const latestCandidate = getLatestTransactionCandidate(conversationHistory);
-    const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
-    const isConversation = candidateData.responseMode === 'CONVERSATION' || usesAuthoritativeFacts;
-    const candidate = !isConversation && latestCandidate
-      ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
-      : candidateData;
+    const resolvedResponse = resolveCandidateResponse(candidateData, latestCandidate, message || '', !!imageBase64);
     res.json({
-      candidate: isConversation ? undefined : candidate,
-      responseMode: isConversation ? 'CONVERSATION' : candidateData.responseMode,
-      explanation: usesAuthoritativeFacts
+      candidate: resolvedResponse.candidate,
+      responseMode: resolvedResponse.responseMode,
+      explanation: resolvedResponse.usesAuthoritativeFacts
         ? buildAuthoritativeConversationReply(message || '', latestCandidate, catalog)
         : candidateData.explanation,
       provider,
@@ -507,12 +559,12 @@ Store Context:
 });
 
 // Fallback rule-based parser for offline / test mock cases
-function fallbackDeterministicParser(text: string, catalog: any[] = []) {
+export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   const lower = text.toLowerCase();
 
   // All standard field label keys for section extraction
   const ALL_FIELD_LABELS = [
-    'customer/reference', 'customer', 'reference', 'pelanggan', 'buyer', 'a.n', 'an', 'atas nama', 'nama', 'penerima', 'ref',
+    'customer/reference', 'customer', 'reference', 'pelanggan', 'buyer', 'a.n', 'atas nama', 'nama', 'penerima', 'ref',
     'order', 'pesanan', 'item', 'barang', 'produk', 'product',
     'payment', 'pembayaran', 'bayar', 'transfer', 'tf', 'total',
     'address', 'alamat', 'kirim ke', 'tujuan', 'lokasi',
@@ -529,10 +581,10 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   }
 
   // 1. Extract Customer / Reference section
-  const customerSection = extractSection(text, ['customer/reference', 'customer', 'reference', 'pelanggan', 'buyer', 'a.n', 'an', 'atas nama', 'nama', 'penerima', 'ref']);
+  const customerSection = extractSection(text, ['customer/reference', 'customer', 'reference', 'pelanggan', 'buyer', 'a.n', 'atas nama', 'nama', 'penerima', 'ref']);
   let detectedName = customerSection || '';
   if (!detectedName) {
-    const refMatch = text.match(/(?:customer\/reference|customer|reference|pelanggan|buyer|a\.n|an|atas nama|nama|penerima|ref)[:\s]*\n*([^\n\r,]+)/i);
+    const refMatch = text.match(/(?:customer\/reference|customer|reference|pelanggan|buyer|a\.n|atas nama|nama|penerima|ref)[:\s]*\n*([^\n\r,]+)/i);
     if (refMatch && refMatch[1]) {
       detectedName = refMatch[1].trim();
     }
@@ -607,11 +659,11 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     const isMed = clean.includes('medium') || clean.includes('med ');
     const isPrem = clean.includes('premium') || clean.includes('prem ') || clean.includes('specialty');
 
+    if (clean.includes('gayo')) return activeCatalog.find(p => p.sku === 'KOPI-GAYO-250');
     if (isMed && is1kg) return activeCatalog.find(p => p.sku === 'COFFEE-MED-1KG');
     if (isMed) return activeCatalog.find(p => p.sku === 'COFFEE-MED-250');
     if (isPrem && is1kg) return activeCatalog.find(p => p.sku === 'COFFEE-PREM-1KG');
     if (isPrem) return activeCatalog.find(p => p.sku === 'COFFEE-PREM-250');
-    if (clean.includes('gayo')) return activeCatalog.find(p => p.sku === 'KOPI-GAYO-250');
     if (clean.includes('robusta') || clean.includes('lampung')) return activeCatalog.find(p => p.sku === 'KOPI-ROB-200');
     if (clean.includes('drip')) return activeCatalog.find(p => p.sku === 'KOPI-DRIP-10S');
     if (clean.includes('madu')) return activeCatalog.find(p => p.sku === 'MADU-HUTAN-350');
@@ -760,6 +812,7 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   }
 
   let courierName = '';
+  const trackingMatch = text.match(/(?:tracking|resi|no\.?\s*resi)\s*[:#-]?\s*([A-Z0-9-]{6,})/i);
   let quotedOngkir = 0;
   let buyerOngkir = 0;
 
@@ -810,6 +863,7 @@ function fallbackDeterministicParser(text: string, catalog: any[] = []) {
     quotedOngkir,
     buyerOngkir,
     sellerAbsorbedOngkir: 0,
+    trackingNumber: trackingMatch?.[1],
     confidence: 0.95,
     ambiguities,
     explanation: `Here's what I found from your message:\n- Buyer / Reference: ${detectedName}\n- ${matchedItems.map(i => `${i.quantity}x ${i.productName} (@ Rp ${(i.suggestedUnitPrice || 0).toLocaleString('id-ID')})`).join(', ')}\n- Payment: ${paymentMethod}${paymentAmount ? ` (Rp ${paymentAmount.toLocaleString('id-ID')})` : ''}${ambiguities.length > 0 ? `\n\nI need one detail:\n- ${ambiguities.join('\n- ')}` : ''}`,

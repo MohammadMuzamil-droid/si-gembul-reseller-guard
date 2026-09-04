@@ -46,6 +46,7 @@ interface AgentChatDeskProps {
   chatHistory: AgentChatMessage[];
   onSendMessage: (text: string, imageBase64?: string) => Promise<void>;
   onOrderCreated: (order: ResellerOrder) => void;
+  onTransactionCompleted: () => void;
   onClearChat: () => void;
   onUpdateMessageCandidate?: (messageId: string, candidate: CandidateExtraction) => void;
   isProcessing: boolean;
@@ -58,6 +59,7 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
   chatHistory,
   onSendMessage,
   onOrderCreated,
+  onTransactionCompleted,
   onClearChat,
   onUpdateMessageCandidate,
   isProcessing,
@@ -144,6 +146,7 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
     }
     const order = buildOrderFromCandidate(finalCandidate, catalog, settings, userId);
     onOrderCreated(order);
+    onTransactionCompleted();
     setEditingCandidateId(null);
     setEditedCandidate(null);
   };
@@ -280,7 +283,7 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
                     </div>
 
                     {/* Extracted Structured Candidate Card */}
-                    {msg.candidate && (
+                    {msg.candidate && !msg.transactionClosed && (
                       <CandidateActionCard
                         candidate={msg.candidate}
                         catalog={catalog}
@@ -625,6 +628,9 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
               <div className="text-slate-600 line-clamp-2" title={activeCand.recipientAddress}>
                 {activeCand.recipientAddress || 'Direct / Pickup'}
               </div>
+              {activeCand.trackingNumber && (
+                <div className="text-emerald-700 font-medium mt-1">Resi: {activeCand.trackingNumber}</div>
+              )}
             </div>
           )}
         </div>
@@ -661,7 +667,9 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
 
         {isEditing ? (
           <div className="space-y-2">
-            {(activeCand.items || []).map((item, idx) => (
+            {(activeCand.items || []).map((item, idx) => {
+              const isCatalogItem = !!matchedItems[idx]?.productId;
+              return (
               <div key={idx} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                 <div className="flex items-center gap-2">
                   <input
@@ -705,7 +713,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-slate-500 block mb-0.5">Unit Price (Rp)</label>
+                    <label className="text-[10px] text-slate-500 block mb-0.5">{isCatalogItem ? 'Catalog Price (Rp)' : 'Unit Price (Rp)'}</label>
                     <input
                       type="number"
                       min="0"
@@ -717,11 +725,13 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
                         onUpdateEditedCandidate({ ...activeCand, items: nextItems });
                       }}
                       className="w-full p-1 bg-white border border-slate-300 rounded text-xs"
+                      disabled={isCatalogItem}
                     />
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
@@ -796,6 +806,13 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
                 className="w-full p-1 bg-white border border-slate-300 rounded text-xs"
               />
             </div>
+            <input
+              type="text"
+              value={activeCand.trackingNumber || ''}
+              onChange={(e) => onUpdateEditedCandidate({ ...activeCand, trackingNumber: e.target.value })}
+              placeholder="Tracking / Resi (optional)"
+              className="w-full p-1 bg-white border border-slate-300 rounded text-xs"
+            />
           </div>
         </div>
       )}
@@ -816,7 +833,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
           <span>Rp {financials.totalPayable.toLocaleString('id-ID')}</span>
         </div>
         <div className="flex justify-between text-[11px] text-slate-400 pt-0.5">
-          <span>Est. Net Profit (Margin: {financials.profitMarginPercent}%)</span>
+          <span>Est. Net Profit (Product Margin: {financials.profitMarginPercent}%)</span>
           <span className="text-emerald-300 font-semibold">+Rp {financials.estimatedNetProfit.toLocaleString('id-ID')}</span>
         </div>
       </div>
