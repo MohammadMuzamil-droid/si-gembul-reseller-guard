@@ -220,15 +220,54 @@ const nusaPayPayerEnrichment = resolveCandidateResponse({
   payerName: 'Ahmad Pratama',
   paymentMethod: 'TRANSFER',
   items: priorCandidate.items,
+  paymentEvidence: { state: 'EXPLICIT_VALUE', amount: 68000, proofClaimed: true, reference: 'NP-DEMO-030926-0941-6817' },
   shippingEvidence: { state: 'UNSPECIFIED' },
-  factStates: { claimedPaymentAmount: 'EXPLICIT_VALUE' },
-  claimedPaymentAmount: 68000,
+  buyerName: 'Siti Rahmawati',
+  recipientName: 'Rina Wulandari',
   identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'EXPLICIT_VALUE', recipientName: 'UNSPECIFIED' },
   confidence: 0.95,
   ambiguities: [],
   explanation: 'Payment evidence processed.',
 }, gd01AdminContractResponse.candidate, 'NusaPay payment evidence', true, INITIAL_CATALOG);
 assert.equal(nusaPayPayerEnrichment.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(nusaPayPayerEnrichment.candidate?.buyerName, 'Siti Rahmawati');
+assert.equal(nusaPayPayerEnrichment.candidate?.recipientName, 'Rina Wulandari');
+assert.equal(nusaPayPayerEnrichment.candidate?.claimedPaymentAmount, 68000);
+assert.equal(nusaPayPayerEnrichment.candidate?.paymentProofClaimed, true);
+assert.equal(nusaPayPayerEnrichment.candidate?.transferReference, 'NP-DEMO-030926-0941-6817');
+assert.equal(nusaPayPayerEnrichment.candidate?.factStates?.claimedPaymentAmount, 'EXPLICIT_VALUE');
+assert.equal(nusaPayPayerEnrichment.candidate?.structuredFactIssues?.length, 0);
+
+const laterShippingEvidencePreservesPayment = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: priorCandidate.items,
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  trackingNumber: 'NPX-DEMO-260903-18427',
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping receipt processed.',
+}, nusaPayPayerEnrichment.candidate, 'Shipping receipt evidence', true, INITIAL_CATALOG);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.claimedPaymentAmount, 68000);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.paymentProofClaimed, true);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.transferReference, 'NP-DEMO-030926-0941-6817');
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.trackingNumber, 'NPX-DEMO-260903-18427');
+
+const invalidAtomicPayment = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  payerName: 'Ahmad Pratama',
+  items: priorCandidate.items,
+  paymentEvidence: { state: 'EXPLICIT_VALUE', proofClaimed: true },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'EXPLICIT_VALUE', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Payment evidence processed.',
+}, gd01AdminContractResponse.candidate, 'NusaPay payment evidence', true, INITIAL_CATALOG);
+assert.equal(invalidAtomicPayment.candidate?.claimedPaymentAmount, undefined);
+assert.ok((invalidAtomicPayment.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('Payment evidence needs a valid explicit amount')));
 
 // D-01: a model CONVERSATION response cannot erase an active candidate when image evidence arrives.
 const conversationModeEvidence = resolveCandidateResponse({
@@ -369,8 +408,7 @@ const noisyBuyerUpdate = resolveCandidateResponse({
 }, priorCandidate, 'Admin evidence', true, INITIAL_CATALOG);
 assert.equal(noisyBuyerUpdate.candidate?.buyerName, 'Siti Rahmawati');
 assert.equal(noisyBuyerUpdate.candidate?.payerName, 'Ahmad Pratama');
-assert.ok((noisyBuyerUpdate.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('buyerName must be omitted')));
-assert.ok(getCandidateConfirmationBlockers(noisyBuyerUpdate.candidate, matchItemsWithCatalog(noisyBuyerUpdate.candidate.items, INITIAL_CATALOG, 20)).length > 0);
+assert.equal((noisyBuyerUpdate.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('buyerName must be omitted')), false);
 
 // D-02d: server-side validation never recovers authority from explanation.
 const inconsistentStructuredResponse = resolveCandidateResponse({

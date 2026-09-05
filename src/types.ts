@@ -21,6 +21,17 @@ export interface ShippingEvidence {
   chargeTo?: ShippingChargeTo;
 }
 
+/**
+ * One evidence-grounded payment fact. The server maps this atomic model
+ * contract into the established candidate payment fields.
+ */
+export interface PaymentEvidence {
+  state: EvidenceFactState;
+  amount?: number;
+  proofClaimed?: boolean;
+  reference?: string;
+}
+
 export type PaymentStatus = 
   | 'NEEDS_PROOF'     // Payment still needs proof
   | 'VERIFIED'        // Payment verified
@@ -259,6 +270,8 @@ export interface CandidateExtraction {
   }[];
   
   paymentMethod?: PaymentMethod;
+  /** Atomic Gemini evidence contract, normalized server-side into legacy fields below. */
+  paymentEvidence?: PaymentEvidence;
   claimedPaymentAmount?: number;
   paymentProofClaimed?: boolean;
   transferReference?: string;

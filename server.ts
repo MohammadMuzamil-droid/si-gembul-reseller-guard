@@ -74,9 +74,17 @@ const EXTRACTION_SCHEMA: Schema = {
       enum: ['TRANSFER', 'COD', 'DIRECT_COD', 'QRIS', 'CASH'],
       description: 'Payment method chosen or claimed'
     },
-    claimedPaymentAmount: { type: Type.NUMBER, description: 'Explicit payment amount in IDR mentioned in chat (e.g. 30000)' },
-    paymentProofClaimed: { type: Type.BOOLEAN, description: 'True if user says they already transferred or attached receipt' },
-    transferReference: { type: Type.STRING, description: 'Transfer transaction ID / ref number' },
+    paymentEvidence: {
+      type: Type.OBJECT,
+      properties: {
+        state: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
+        amount: { type: Type.NUMBER, description: 'Explicit payment amount in IDR. Omit only when state is UNSPECIFIED.' },
+        proofClaimed: { type: Type.BOOLEAN, description: 'True when the latest evidence is a payment claim or receipt.' },
+        reference: { type: Type.STRING, description: 'Payment transaction/reference ID exactly as shown in evidence.' },
+      },
+      required: ['state'],
+      description: 'One atomic payment-evidence fact. EXPLICIT_VALUE requires a positive amount, EXPLICIT_ZERO requires amount 0, and UNSPECIFIED omits amount. Never derive payment facts from explanation prose.',
+    },
     courierName: { type: Type.STRING, description: 'Requested courier e.g. J&T Express, JNE, SiCepat, GoSend, Direct / Pickup' },
     shippingEvidence: {
       type: Type.OBJECT,
@@ -90,14 +98,6 @@ const EXTRACTION_SCHEMA: Schema = {
     },
     trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
-    factStates: {
-      type: Type.OBJECT,
-      properties: {
-        claimedPaymentAmount: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_ZERO', 'EXPLICIT_VALUE'] },
-      },
-      required: ['claimedPaymentAmount'],
-      description: 'State of claimed payment evidence only. Shipping uses shippingEvidence, never separate flat state fields.',
-    },
     identityFactStates: {
       type: Type.OBJECT,
       properties: {
@@ -119,7 +119,7 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['responseMode', 'items', 'shippingEvidence', 'factStates', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'items', 'paymentEvidence', 'shippingEvidence', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
 };
 
 function isConversationalQuestion(message: string): boolean {
@@ -309,6 +309,73 @@ function normalizeShippingChargeTo(value: unknown): ShippingChargeTo | undefined
   return value === 'BUYER' || value === 'SELLER' || value === 'NOT_SPECIFIED' ? value : undefined;
 }
 
+/** Maps the atomic model-facing payment fact into established candidate fields. */
+function normalizeAtomicPaymentEvidence(
+  candidate: any,
+  factStates: Record<string, EvidenceFactState>,
+  addStructuredFactIssue: (issue: string) => void,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'paymentEvidence')) return;
+
+  const raw = candidate.paymentEvidence;
+  const invalidate = (issue: string) => {
+    delete candidate.claimedPaymentAmount;
+    factStates.claimedPaymentAmount = 'UNSPECIFIED';
+    candidate.paymentEvidence = { state: 'UNSPECIFIED' };
+    addStructuredFactIssue(issue);
+  };
+
+  if (!raw || typeof raw !== 'object') {
+    invalidate('Payment evidence must use the structured state and amount contract.');
+    return;
+  }
+
+  const state = normalizeEvidenceFactState(raw.state);
+  const hasAmount = Object.prototype.hasOwnProperty.call(raw, 'amount');
+  const amount = Number(raw.amount);
+  const hasValidAmount = Number.isFinite(amount);
+
+  if (!state && !hasAmount) {
+    delete candidate.claimedPaymentAmount;
+    factStates.claimedPaymentAmount = 'UNSPECIFIED';
+    candidate.paymentEvidence = { state: 'UNSPECIFIED' };
+    return;
+  }
+  if (!state) {
+    invalidate('Payment evidence has an invalid state.');
+    return;
+  }
+  if (state === 'UNSPECIFIED') {
+    if (hasAmount) {
+      invalidate('Unspecified payment evidence must not carry an amount.');
+      return;
+    }
+    delete candidate.claimedPaymentAmount;
+    factStates.claimedPaymentAmount = state;
+    candidate.paymentEvidence = {
+      state,
+      ...(typeof raw.proofClaimed === 'boolean' ? { proofClaimed: raw.proofClaimed } : {}),
+      ...(typeof raw.reference === 'string' && raw.reference.trim() ? { reference: raw.reference.trim() } : {}),
+    };
+  } else {
+    if (!hasValidAmount || (state === 'EXPLICIT_ZERO' && amount !== 0) || (state === 'EXPLICIT_VALUE' && amount <= 0)) {
+      invalidate('Payment evidence needs a valid explicit amount before it can affect the transaction.');
+      return;
+    }
+    candidate.claimedPaymentAmount = amount;
+    factStates.claimedPaymentAmount = state;
+    candidate.paymentEvidence = {
+      state,
+      amount,
+      ...(typeof raw.proofClaimed === 'boolean' ? { proofClaimed: raw.proofClaimed } : {}),
+      ...(typeof raw.reference === 'string' && raw.reference.trim() ? { reference: raw.reference.trim() } : {}),
+    };
+  }
+
+  if (typeof raw.proofClaimed === 'boolean') candidate.paymentProofClaimed = raw.proofClaimed;
+  if (typeof raw.reference === 'string' && raw.reference.trim()) candidate.transferReference = raw.reference.trim();
+}
+
 /**
  * Maps the single model-facing shipping fact into the established deterministic
  * candidate fields. Legacy flat shipping fields remain supported for fallback
@@ -418,6 +485,7 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     if (!ambiguities.includes(issue)) ambiguities.push(issue);
   };
 
+  normalizeAtomicPaymentEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
 
   for (const field of EVIDENCE_FACT_FIELDS) {
@@ -428,8 +496,10 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     const hasFiniteValue = Number.isFinite(Number(value));
     factStates[field] = state;
 
-    const isModernShippingFact = Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence') && field !== 'claimedPaymentAmount';
-    if (candidate.factStates && !hasDeclaredState && !isModernShippingFact) {
+    const isModernAtomicFact =
+      (field === 'claimedPaymentAmount' && Object.prototype.hasOwnProperty.call(candidate, 'paymentEvidence')) ||
+      (field !== 'claimedPaymentAmount' && Object.prototype.hasOwnProperty.call(candidate, 'shippingEvidence'));
+    if (candidate.factStates && !hasDeclaredState && !isModernAtomicFact) {
       addStructuredFactIssue(`${field} is missing its required evidence state.`);
     }
     if (state === 'UNSPECIFIED' && hasRawValue) {
@@ -574,6 +644,14 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
 
   const mergedCandidate = { ...updatedCandidate };
+  if (mergedCandidate.paymentEvidence?.state === 'UNSPECIFIED' && previousCandidate.paymentEvidence?.state !== 'UNSPECIFIED') {
+    if (previousCandidate.paymentEvidence) {
+      mergedCandidate.paymentEvidence = previousCandidate.paymentEvidence;
+    } else {
+      // Preserve a legacy flat payment fact through the context-field loop.
+      delete mergedCandidate.paymentEvidence;
+    }
+  }
   if (mergedCandidate.shippingEvidence?.state === 'UNSPECIFIED' && previousCandidate.shippingEvidence?.state !== 'UNSPECIFIED') {
     if (previousCandidate.shippingEvidence) {
       mergedCandidate.shippingEvidence = previousCandidate.shippingEvidence;
@@ -631,15 +709,18 @@ export function resolveCandidateResponse(
   hasImageEvidence: boolean,
   catalog: any[] = [],
 ): { candidate: any | undefined; responseMode: 'TRANSACTION' | 'CONVERSATION'; usesAuthoritativeFacts: boolean } {
-  const preparedCandidate = prepareTransactionCandidate(candidateData, catalog);
+  // Merge omission-aware context before final validation. This lets a later
+  // evidence turn omit buyer/recipient safely while preserving prior truth,
+  // without carrying transient pre-merge contract errors into the final card.
+  const contextMergedCandidate = latestCandidate
+    ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
+    : candidateData;
+  const preparedCandidate = prepareTransactionCandidate(contextMergedCandidate, catalog);
   const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
   const isEvidenceUpdate = !!latestCandidate && (hasImageEvidence || hasTransactionEvidenceFacts(preparedCandidate));
   const isConversation = !isEvidenceUpdate && (preparedCandidate.responseMode === 'CONVERSATION' || usesAuthoritativeFacts);
-  const candidate = !isConversation && latestCandidate
-    ? retainOmittedTransactionContext(preparedCandidate, latestCandidate, message || '')
-    : preparedCandidate;
   return {
-    candidate: isConversation ? undefined : prepareTransactionCandidate(candidate, catalog),
+    candidate: isConversation ? undefined : preparedCandidate,
     responseMode: isConversation ? 'CONVERSATION' : 'TRANSACTION',
     usesAuthoritativeFacts: usesAuthoritativeFacts && isConversation,
   };
@@ -730,7 +811,8 @@ Your mission:
      * "Medium 1kg", "Medium 1 kg" -> map to SKU: "COFFEE-MED-1KG" (Sell Price: Rp 60,000, Base Cost: Rp 40,000).
      * "Premium 1kg", "Premium 1 kg" -> map to SKU: "COFFEE-PREM-1KG" (Sell Price: Rp 100,000, Base Cost: Rp 80,000).
    - Only if a product is truly custom and unrelated to coffee or the catalog (e.g. "Matcha Latte", "Kaos Polos", "Mug Keramik"), set matchedSku: "CUSTOM", preserve the exact product name, and note in ambiguities.
-   - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
+    - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
+    - Return paymentEvidence on every response. It is the only model-facing payment amount contract: { state, amount, proofClaimed, reference }. If the latest evidence explicitly shows a positive payment amount, state MUST be EXPLICIT_VALUE and amount MUST contain that number. If it explicitly shows zero, use EXPLICIT_ZERO with amount 0. If no payment amount is evidenced, use UNSPECIFIED and omit amount. Copy a visible reference exactly. Do not emit claimedPaymentAmount, paymentProofClaimed, transferReference, or factStates from Gemini.
    - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
    - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. When shipping is not evidenced, return state UNSPECIFIED and omit amount and chargeTo. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
 4. Keep buyer, payer, and recipient as three distinct identities:
@@ -754,7 +836,7 @@ Your mission:
 8. Distinguish a new or updated transaction from a conversational follow-up:
     - For a question about prior chat context, return responseMode: "CONVERSATION", items: [], and answer from the supplied prior structured transaction context. Do not invent an empty order candidate.
     - Structured transaction context includes transaction identities, payment and shipping facts, plus originalQuantity/originalUnit and normalizedPieces. Treat normalizedPieces and financials as authoritative catalog-derived values; do not re-derive or conflate them from natural-language phrasing.
-    - For a change to a prior transaction, return responseMode: "TRANSACTION" with a complete replacement candidate. Preserve every prior supported buyer, payer, recipient, payment, courier, and shipping fact unless the latest evidence explicitly changes it. Include those preserved facts in the structured candidate, not only in explanation prose.
+    - For a change to a prior transaction, return responseMode: "TRANSACTION". Preserve prior items and other non-stateful context needed for continuity. For buyer, payer, recipient, payment amount, and shipping, report only facts supported by the latest evidence using their state contracts; mark prior-only facts UNSPECIFIED and omit their value fields so the server can preserve established authoritative context.
     - When the latest evidence changes or adds one fact, update only that fact. Explicit zero is a supported value for shipping. Do not omit known facts from the candidate, and do not state transaction facts in explanation that are absent from the candidate.
     - For a clearly new transaction, return responseMode: "TRANSACTION" and do not merge it with an earlier order.
 
