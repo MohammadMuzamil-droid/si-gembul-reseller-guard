@@ -700,8 +700,35 @@ function isFallbackPlaceholderItemSet(items: any[]): boolean {
   return items.length === 1 && items[0]?.matchedSku === 'CUSTOM' && items[0]?.productName === 'Custom Item';
 }
 
+/**
+ * A later operational document can repeat a generic package description
+ * (for example, "coffee, 2 pcs") without establishing a new catalog line.
+ * Such unresolved evidence must not replace an already resolved order item.
+ * A newly resolved catalog item is still allowed to replace the prior item.
+ */
+function shouldPreservePreviousResolvedItems(updatedItems: any[], previousItems: any[], catalog: any[]): boolean {
+  if (!updatedItems.length || !previousItems.length) return false;
+  const canonicalUpdated = canonicalizeCandidateItems(updatedItems, catalog);
+  const canonicalPrevious = canonicalizeCandidateItems(previousItems, catalog);
+  const previousHasResolvedCatalogItem = canonicalPrevious.some(item =>
+    item.resolutionState === 'RESOLVED' && !!item.matchedSku && item.matchedSku !== 'CUSTOM'
+  );
+  const updateHasResolvedCatalogItem = canonicalUpdated.some(item =>
+    item.resolutionState === 'RESOLVED' && !!item.matchedSku && item.matchedSku !== 'CUSTOM'
+  );
+  return previousHasResolvedCatalogItem && !updateHasResolvedCatalogItem;
+}
+
+function hasExplicitSupplementaryEvidence(candidate: any): boolean {
+  return candidate?.paymentEvidence?.state === 'EXPLICIT_VALUE' ||
+    candidate?.paymentEvidence?.state === 'EXPLICIT_ZERO' ||
+    candidate?.shippingEvidence?.state === 'EXPLICIT_VALUE' ||
+    candidate?.shippingEvidence?.state === 'EXPLICIT_ZERO' ||
+    candidate?.deliveryEvidence?.state === 'EXPLICIT_VALUE';
+}
+
 /** Preserve only omitted supported facts when a candidate continues the latest transaction. */
-export function retainOmittedTransactionContext(updatedCandidate: any, previousCandidate: any, message: string): any {
+export function retainOmittedTransactionContext(updatedCandidate: any, previousCandidate: any, message: string, catalog: any[] = []): any {
   if (!previousCandidate || isClearlyNewTransaction(message, updatedCandidate, previousCandidate)) {
     return updatedCandidate;
   }
@@ -746,6 +773,13 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
   if ((!Array.isArray(mergedCandidate.items) || mergedCandidate.items.length === 0 || isFallbackPlaceholderItemSet(mergedCandidate.items)) && Array.isArray(previousCandidate.items)) {
     mergedCandidate.items = previousCandidate.items;
+  } else if (
+    Array.isArray(mergedCandidate.items) &&
+    Array.isArray(previousCandidate.items) &&
+    hasExplicitSupplementaryEvidence(updatedCandidate) &&
+    shouldPreservePreviousResolvedItems(mergedCandidate.items, previousCandidate.items, catalog)
+  ) {
+    mergedCandidate.items = previousCandidate.items;
   } else if (Array.isArray(mergedCandidate.items) && Array.isArray(previousCandidate.items)) {
     mergedCandidate.items = retainOmittedItemQuantity(mergedCandidate.items, previousCandidate.items);
   }
@@ -784,7 +818,7 @@ export function resolveCandidateResponse(
   // evidence turn omit buyer/recipient safely while preserving prior truth,
   // without carrying transient pre-merge contract errors into the final card.
   const contextMergedCandidate = latestCandidate
-    ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '')
+    ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '', catalog)
     : candidateData;
   const preparedCandidate = prepareTransactionCandidate(contextMergedCandidate, catalog);
   const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;

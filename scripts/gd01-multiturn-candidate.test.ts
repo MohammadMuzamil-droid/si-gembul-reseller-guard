@@ -240,7 +240,9 @@ assert.equal(nusaPayPayerEnrichment.candidate?.structuredFactIssues?.length, 0);
 
 const laterShippingEvidencePreservesPayment = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
-  items: priorCandidate.items,
+  // A courier receipt may describe package contents generically. It is not
+  // authoritative evidence that replaces the already resolved catalog line.
+  items: [{ productName: 'Coffee · 2 pcs · 0.5 kg', rawText: 'Coffee · 2 pcs · 0.5 kg', quantity: 2 }],
   paymentEvidence: { state: 'UNSPECIFIED' },
   shippingEvidence: { state: 'UNSPECIFIED' },
   deliveryEvidence: { state: 'EXPLICIT_VALUE', courierName: 'NusaParcel', trackingNumber: 'NPX-DEMO-260903-18427' },
@@ -255,6 +257,25 @@ assert.equal(laterShippingEvidencePreservesPayment.candidate?.transferReference,
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.payerName, 'Ahmad Pratama');
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.courierName, 'NusaParcel');
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.trackingNumber, 'NPX-DEMO-260903-18427');
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.items?.length, 1);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.items?.[0]?.matchedSku, 'COFFEE-PREM-250');
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.items?.[0]?.quantity, 2);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.buyerOngkir, 18000);
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.claimedPaymentAmount, 68000);
+
+const explicitUnresolvedProductChangeIsNotHidden = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: [{ productName: 'Arabica', rawText: 'Arabica 2 bungkus', quantity: 2 }],
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'UNSPECIFIED' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.7,
+  ambiguities: [],
+  explanation: 'A product change needs clarification.',
+}, nusaPayPayerEnrichment.candidate, 'Ganti produknya menjadi Arabica 2 bungkus', false, INITIAL_CATALOG);
+assert.equal(explicitUnresolvedProductChangeIsNotHidden.candidate?.items?.[0]?.resolutionState, 'UNRESOLVED');
+assert.equal(explicitUnresolvedProductChangeIsNotHidden.candidate?.items?.[0]?.rawText, 'Arabica 2 bungkus');
 
 const trackingWithoutCourier = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
