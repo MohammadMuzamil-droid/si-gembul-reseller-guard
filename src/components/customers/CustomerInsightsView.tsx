@@ -3,7 +3,7 @@
  * and deliberately never writes profiles or changes transaction state.
  */
 import React, { useMemo, useState } from 'react';
-import { ResellerOrder } from '../../types';
+import { CustomerIdentityDecision, ResellerOrder } from '../../types';
 import { CustomerProfile, RepeatOpportunityStatus, safelyDeriveCustomerIntelligence } from '../../lib/customerIntelligence';
 import { SiGembulMascot } from '../mascot/SiGembulMascot';
 import { CalendarClock, CircleAlert, History, Sparkles, UsersRound, WalletCards } from 'lucide-react';
@@ -11,6 +11,7 @@ import { CalendarClock, CircleAlert, History, Sparkles, UsersRound, WalletCards 
 interface CustomerInsightsViewProps {
   userId: string;
   orders: ResellerOrder[];
+  onResolveIdentity: (orderId: string, decision: CustomerIdentityDecision, existingProfileId: string) => Promise<void>;
 }
 
 const statusAppearance: Record<RepeatOpportunityStatus, { label: string; className: string }> = {
@@ -23,11 +24,25 @@ const statusAppearance: Record<RepeatOpportunityStatus, { label: string; classNa
 
 const formatDate = (value: string) => new Date(value).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
 
-export const CustomerInsightsView: React.FC<CustomerInsightsViewProps> = ({ userId, orders }) => {
+export const CustomerInsightsView: React.FC<CustomerInsightsViewProps> = ({ userId, orders, onResolveIdentity }) => {
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [resolvingOrderId, setResolvingOrderId] = useState<string | null>(null);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
   const intelligence = useMemo(() => safelyDeriveCustomerIntelligence(orders, userId), [orders, userId]);
   const selectedProfile = intelligence.profiles.find((profile) => profile.id === selectedProfileId) || intelligence.profiles[0] || null;
   const opportunityCount = intelligence.profiles.filter((profile) => ['APPROACHING', 'DUE', 'OVERDUE'].includes(profile.opportunityStatus)).length;
+
+  const resolveIdentity = async (orderId: string, decision: CustomerIdentityDecision, existingProfileId: string) => {
+    setResolvingOrderId(orderId);
+    setResolutionError(null);
+    try {
+      await onResolveIdentity(orderId, decision, existingProfileId);
+    } catch {
+      setResolutionError('The identity decision could not be saved. No customer histories were changed. Please try again.');
+    } finally {
+      setResolvingOrderId(null);
+    }
+  };
 
   if (intelligence.error) {
     return (
@@ -57,6 +72,44 @@ export const CustomerInsightsView: React.FC<CustomerInsightsViewProps> = ({ user
           <span className="font-bold">Buyer-first matching.</span> Payer and recipient are not merged into buyer history.
         </div>
       </div>
+
+      {intelligence.possibleMatches.length > 0 && (
+        <div className="space-y-3">
+          {intelligence.possibleMatches.map((match) => (
+            <div key={`${match.orderId}:${match.existingProfileId}`} className="bg-amber-50 border border-amber-300 rounded-2xl p-4 sm:p-5">
+              <div className="flex items-start gap-3">
+                <CircleAlert className="w-5 h-5 shrink-0 text-amber-700 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-bold text-sm text-amber-950">Possible existing customer found</h3>
+                  <p className="text-xs text-amber-900 mt-1">
+                    Order <strong>{match.orderNumber}</strong> names <strong>{match.buyerName}</strong>, but has no buyer phone or email. It may belong to the existing <strong>{match.existingCustomerName}</strong> history.
+                  </p>
+                  <p className="text-[11px] text-amber-800 mt-1">Nothing is merged until you decide. The order, payment, and shipping details will not be changed.</p>
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    <button
+                      type="button"
+                      disabled={resolvingOrderId === match.orderId}
+                      onClick={() => resolveIdentity(match.orderId, 'SAME_CUSTOMER', match.existingProfileId)}
+                      className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      Yes, same customer
+                    </button>
+                    <button
+                      type="button"
+                      disabled={resolvingOrderId === match.orderId}
+                      onClick={() => resolveIdentity(match.orderId, 'DIFFERENT_CUSTOMER', match.existingProfileId)}
+                      className="px-3 py-2 rounded-xl bg-white border border-amber-400 text-amber-950 text-xs font-bold hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      No, keep separate
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+          {resolutionError && <p className="text-xs text-rose-700">{resolutionError}</p>}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="bg-white border border-slate-200 rounded-2xl p-4">

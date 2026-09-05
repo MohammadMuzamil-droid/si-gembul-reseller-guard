@@ -25,7 +25,8 @@ import {
   ResellerSettings, 
   DailyCloseRecord, 
   AgentChatMessage,
-  CandidateExtraction 
+  CandidateExtraction,
+  CustomerIdentityDecision,
 } from './types';
 import { DEFAULT_SETTINGS, getSyntheticDemoOrders, INITIAL_CATALOG } from './data/mockData';
 import { AuthOverlay } from './components/auth/AuthOverlay';
@@ -35,6 +36,7 @@ import { CustomerInsightsView } from './components/customers/CustomerInsightsVie
 import { TutupBukuView } from './components/tutupbuku/TutupBukuView';
 import { AdvancedSettings } from './components/settings/AdvancedSettings';
 import { SiGembulMascot } from './components/mascot/SiGembulMascot';
+import { applyCustomerIdentityDecision, deriveCustomerIntelligence } from './lib/customerIntelligence';
 import { 
   MessageSquareText, 
   PackageCheck, 
@@ -326,6 +328,26 @@ export default function App() {
     showToast(`Order ${updated.orderNumber} updated.`);
   };
 
+  const handleResolveCustomerIdentity = async (
+    orderId: string,
+    decision: CustomerIdentityDecision,
+    existingProfileId: string,
+  ) => {
+    if (!currentUser) return;
+    const order = orders.find((candidate) => candidate.id === orderId && candidate.userId === currentUser.uid);
+    if (!order) throw new Error('The selected order is not available in this workspace.');
+
+    const isCurrentPossibleMatch = deriveCustomerIntelligence(orders, currentUser.uid).possibleMatches.some((match) =>
+      match.orderId === orderId && match.existingProfileId === existingProfileId
+    );
+    if (!isCurrentPossibleMatch) throw new Error('This possible customer match is no longer current.');
+
+    const updated = applyCustomerIdentityDecision(order, currentUser.uid, decision, existingProfileId);
+    await saveUserOrder(currentUser.uid, updated);
+    setOrders((current) => current.map((candidate) => candidate.id === updated.id ? updated : candidate));
+    showToast(decision === 'SAME_CUSTOMER' ? 'Customer histories linked after your confirmation.' : 'Customer histories kept separate.');
+  };
+
   // Clear Chat history
   const handleClearChat = async () => {
     if (!currentUser) return;
@@ -552,7 +574,7 @@ export default function App() {
         )}
 
         {activeTab === 'customer_insights' && (
-          <CustomerInsightsView userId={currentUser.uid} orders={orders} />
+          <CustomerInsightsView userId={currentUser.uid} orders={orders} onResolveIdentity={handleResolveCustomerIdentity} />
         )}
 
         {activeTab === 'tutup_buku' && (

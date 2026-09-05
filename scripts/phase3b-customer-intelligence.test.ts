@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import type { ResellerOrder } from '../src/types';
-import { deriveCustomerIntelligence, safelyDeriveCustomerIntelligence } from '../src/lib/customerIntelligence';
+import { applyCustomerIdentityDecision, deriveCustomerIntelligence, safelyDeriveCustomerIntelligence } from '../src/lib/customerIntelligence';
 import { getSyntheticDemoOrders } from '../src/data/mockData';
 
 const userA = 'user-a';
@@ -57,6 +57,46 @@ const similar = deriveCustomerIntelligence([
   order('name-2', userA, 'Dewi Lestari', '081200000006', day(30)),
 ], userA, asOf);
 assert.equal(similar.profiles.length, 2);
+
+// Human-in-loop identity continuity: a name-only completed order may be suggested,
+// but must remain separate until the reseller makes an explicit decision.
+const establishedSiti = [
+  order('siti-1', userA, 'Siti Rahmawati', '081200000009', day(0)),
+  order('siti-2', userA, 'Siti Rahmawati', '081200000009', day(28)),
+  order('siti-3', userA, 'Siti Rahmawati', '081200000009', day(56)),
+];
+const newSiti = order('siti-new', userA, 'Siti Rahmawati', undefined, day(58));
+const unresolvedIdentity = deriveCustomerIntelligence([...establishedSiti, newSiti], userA, asOf);
+assert.equal(unresolvedIdentity.profiles.length, 2);
+assert.equal(unresolvedIdentity.possibleMatches.length, 1);
+assert.equal(unresolvedIdentity.possibleMatches[0].orderId, 'siti-new');
+assert.equal(unresolvedIdentity.possibleMatches[0].existingProfileId, 'phone:081200000009');
+
+const decidedAt = day(59);
+const sameCustomer = applyCustomerIdentityDecision(newSiti, userA, 'SAME_CUSTOMER', 'phone:081200000009', decidedAt);
+const linkedIdentity = deriveCustomerIntelligence([...establishedSiti, sameCustomer], userA, asOf);
+assert.equal(linkedIdentity.profiles.length, 1);
+assert.equal(linkedIdentity.profiles[0].completedOrderCount, 4);
+assert.deepEqual(linkedIdentity.profiles[0].reorderIntervalsDays, [28, 28, 2]);
+assert.equal(linkedIdentity.profiles[0].representativeIntervalDays, 28);
+assert.equal(linkedIdentity.possibleMatches.length, 0);
+
+const differentCustomer = applyCustomerIdentityDecision(newSiti, userA, 'DIFFERENT_CUSTOMER', 'phone:081200000009', decidedAt);
+const separatedIdentity = deriveCustomerIntelligence([...establishedSiti, differentCustomer], userA, asOf);
+assert.equal(separatedIdentity.profiles.length, 2);
+assert.equal(separatedIdentity.possibleMatches.length, 0);
+
+// The decision changes only identity metadata, update time, and the audit trail.
+assert.deepEqual(sameCustomer.items, newSiti.items);
+assert.deepEqual(sameCustomer.financials, newSiti.financials);
+assert.deepEqual(sameCustomer.payer, newSiti.payer);
+assert.deepEqual(sameCustomer.recipient, newSiti.recipient);
+assert.deepEqual(sameCustomer.shipping, newSiti.shipping);
+assert.equal(sameCustomer.paymentStatus, newSiti.paymentStatus);
+assert.equal(sameCustomer.shippingStatus, newSiti.shippingStatus);
+assert.equal(sameCustomer.customerIdentityResolution?.decision, 'SAME_CUSTOMER');
+assert.equal(sameCustomer.auditTrail[0].action, 'RESOLVE_CUSTOMER_IDENTITY');
+assert.throws(() => applyCustomerIdentityDecision(newSiti, userB, 'SAME_CUSTOMER', 'phone:081200000009'));
 
 // I/J: products, quantities, sales, and profit reuse stored authoritative financials.
 const financialOrder = order('financial', userA, 'Maya', '081200000001', day(30), {

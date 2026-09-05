@@ -156,6 +156,20 @@ export interface AuditEntry {
   reason?: string;
 }
 
+export type CustomerIdentityDecision = 'SAME_CUSTOMER' | 'DIFFERENT_CUSTOMER';
+
+/**
+ * A reseller's explicit decision about a possible customer match. The decision
+ * links history without fabricating missing phone/email evidence or changing
+ * the underlying transaction.
+ */
+export interface CustomerIdentityResolution {
+  decision: CustomerIdentityDecision;
+  comparedProfileId: string;
+  decidedAt: string;
+  decidedBy: 'USER_CONFIRMATION';
+}
+
 export interface ResellerOrder {
   id: string;
   userId: string;
@@ -197,6 +211,7 @@ export interface ResellerOrder {
   customerNotes?: string;
   isClosedInTutupBuku?: boolean;
   tutupBukuId?: string;
+  customerIdentityResolution?: CustomerIdentityResolution;
 }
 
 export interface DailyCloseRecord {
