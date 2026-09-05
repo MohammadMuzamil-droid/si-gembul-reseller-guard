@@ -59,9 +59,9 @@ const EXTRACTION_SCHEMA: Schema = {
       items: {
         type: Type.OBJECT,
         properties: {
-          matchedSku: { type: Type.STRING, description: 'Matching product SKU from catalog if recognized' },
-          rawText: { type: Type.STRING, description: 'The exact raw phrase used in the message (e.g. "2 Medium coffee")' },
-          productName: { type: Type.STRING, description: 'Standard or extracted product name (e.g. "Medium coffee")' },
+          matchedSku: { type: Type.STRING, description: 'Matching product SKU only when a distinguishing catalog variant token is literally present in rawText. Omit for family-only evidence such as "Arabica".' },
+          rawText: { type: Type.STRING, description: 'Verbatim product phrase visible in the latest message or image (e.g. "Arabica 2 bungkus ya"). Never expand, translate, normalize, or add a catalog variant token that is not literally visible.' },
+          productName: { type: Type.STRING, description: 'Product family/name supported by rawText. Do not replace a family-only phrase with a specific catalog variant.' },
           quantity: { type: Type.INTEGER, description: 'Quantity count ordered' },
           suggestedUnitPrice: { type: Type.NUMBER, description: 'Unit price in IDR if mentioned or derived from total payment' },
           suggestedUnitCost: { type: Type.NUMBER, description: 'Unit modal cost in IDR' },
@@ -910,6 +910,8 @@ Your mission:
    - "Order:", "Pesanan:", "Item:", "Produk:" -> extract ordered items with their explicit quantities and product names.
    - "Payment:", "Pembayaran:", "Bayar:" -> extract payment amount and method.
 3. Handle product catalog matching and normalization:
+   - The item's rawText is the evidence anchor. Copy only the literal product phrase visible in the latest message/image. Never rewrite rawText to a catalog name or add origin, roast, size, or variant words that are not visibly present.
+   - Generic family terms such as "Arabica", "Arabika", "coffee", or "kopi" are insufficient to select a specific SKU when multiple catalog variants could match. Preserve that family-only rawText, omit matchedSku, and add a specific variant ambiguity. Wait for a later clarification such as a visible origin/variant/size token.
    - Match against the reseller's product catalog when the product name, variant, or keyword matches:
      * "Medium", "Medium coffee", "Kopi Medium", "Med" -> map to SKU: "COFFEE-MED-250" (Sell Price: Rp 15,000, Base Cost: Rp 10,000).
      * "Premium", "Premium coffee", "Kopi Premium", "Prem" -> map to SKU: "COFFEE-PREM-250" (Sell Price: Rp 25,000, Base Cost: Rp 20,000).
