@@ -520,6 +520,28 @@ assert.equal(guardedArabica.items[0].matchedSku, undefined);
 assert.equal(guardedArabica.items[0].resolutionState, 'UNRESOLVED');
 const guardedItems = matchItemsWithCatalog(guardedArabica.items, INITIAL_CATALOG, 20);
 assert.ok(getCandidateConfirmationBlockers(guardedArabica, guardedItems).length > 0);
+const sourceGroundedArabica = prepareTransactionCandidate({
+  sourceEvidenceText: 'Dimas Setiawan\nMas, Arabica masih ada?\nAda mas.\nArabica 2 bungkus ya.',
+  buyerName: 'Dimas Setiawan',
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Kopi Arabika Gayo Aceh 250g', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Candidate extraction.',
+}, INITIAL_CATALOG);
+assert.equal(sourceGroundedArabica.items[0].matchedSku, undefined);
+assert.equal(sourceGroundedArabica.items[0].resolutionState, 'UNRESOLVED');
+assert.match(sourceGroundedArabica.items[0].rawText, /Arabica/i);
+assert.ok(sourceGroundedArabica.ambiguities.some((issue: string) => issue.includes('Specific product variant is unresolved')));
+
+const sourceGroundedGayoClarification = prepareTransactionCandidate({
+  sourceEvidenceText: 'Yang Gayo Premium 250gr.',
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Gayo Premium 250gr', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  confidence: 0.99,
+  ambiguities: [],
+  explanation: 'Candidate extraction.',
+}, INITIAL_CATALOG);
+assert.equal(sourceGroundedGayoClarification.items[0].matchedSku, 'KOPI-GAYO-250');
+assert.equal(sourceGroundedGayoClarification.items[0].resolutionState, 'RESOLVED');
 const resolvedInitialArabica = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
   buyerName: 'Dimas Setiawan',

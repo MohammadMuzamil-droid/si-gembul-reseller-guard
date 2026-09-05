@@ -11,7 +11,7 @@ import { GoogleGenAI, Type, Schema } from '@google/genai';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import dotenv from 'dotenv';
-import { canonicalizeCandidateItems } from './src/lib/deterministicEngine';
+import { canonicalizeCandidateItems, isPartialCatalogVariantReference } from './src/lib/deterministicEngine';
 
 dotenv.config();
 
@@ -42,6 +42,10 @@ const EXTRACTION_SCHEMA: Schema = {
       type: Type.STRING,
       enum: ['TRANSACTION', 'CONVERSATION'],
       description: 'TRANSACTION for a new or updated order candidate; CONVERSATION for a factual follow-up about prior context.'
+    },
+    sourceEvidenceText: {
+      type: Type.STRING,
+      description: 'Verbatim transcription of transaction-relevant text visible in the latest message or image only. Never add catalog words that are not visible.'
     },
     buyerName: { type: Type.STRING, description: 'Name, customer identifier, or reference code of the buyer ordering (e.g. "TEST-ISOLATION-A", "Rina Handayani")' },
     buyerPhone: { type: Type.STRING, description: 'Phone or WhatsApp number of buyer' },
@@ -127,7 +131,7 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['responseMode', 'items', 'paymentEvidence', 'shippingEvidence', 'deliveryEvidence', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'sourceEvidenceText', 'items', 'paymentEvidence', 'shippingEvidence', 'deliveryEvidence', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
 };
 
 function isConversationalQuestion(message: string): boolean {
@@ -547,6 +551,13 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     if (!ambiguities.includes(issue)) ambiguities.push(issue);
   };
 
+  candidate.items = groundCandidateItemsInSource(
+    Array.isArray(candidate.items) ? candidate.items : [],
+    candidate.sourceEvidenceText,
+    catalog,
+    ambiguities,
+  );
+
   normalizeAtomicPaymentEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicDeliveryEvidence(candidate, addStructuredFactIssue);
@@ -620,6 +631,64 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   }
   candidate.ambiguities = ambiguities;
   return candidate;
+}
+
+function evidenceWords(value: unknown): string[] {
+  return (typeof value === 'string' ? value : '')
+    .toLowerCase()
+    .match(/[a-z0-9]+/g) || [];
+}
+
+function findPartialCatalogPhraseInEvidence(sourceEvidenceText: string, catalog: any[]): string | undefined {
+  const words = sourceEvidenceText.match(/[A-Za-z0-9]+/g) || [];
+  for (let size = Math.min(4, words.length); size >= 1; size -= 1) {
+    for (let index = 0; index <= words.length - size; index += 1) {
+      const phrase = words.slice(index, index + size).join(' ');
+      if (isPartialCatalogVariantReference(phrase, catalog)) return phrase;
+    }
+  }
+  return undefined;
+}
+
+function distinctiveCatalogTokens(item: any, catalog: any[]): string[] {
+  const sku = item?.matchedSku;
+  if (!sku) return [];
+  const current = catalog.find(product => product.sku === sku);
+  if (!current) return evidenceWords(`${item.productName || ''} ${sku}`);
+  const tokenSets = catalog.map(product => new Set(evidenceWords(`${product.name || ''} ${product.sku || ''}`)));
+  const currentTokens = evidenceWords(`${current.name || ''} ${current.sku || ''}`);
+  return [...new Set(currentTokens)].filter(token =>
+    token.length >= 3 &&
+    !/^\d+$/.test(token) &&
+    !['kopi', 'coffee', 'pack', 'pcs', 'gram'].includes(token) &&
+    tokenSets.filter(tokens => tokens.has(token)).length === 1
+  );
+}
+
+/** Reject a specific catalog resolution that is unsupported by the literal latest evidence. */
+function groundCandidateItemsInSource(items: any[], sourceEvidenceText: unknown, catalog: any[], ambiguities: string[]): any[] {
+  if (typeof sourceEvidenceText !== 'string' || !sourceEvidenceText.trim() || !catalog.length) return items;
+  const sourceWords = new Set(evidenceWords(sourceEvidenceText));
+  const partialPhrase = findPartialCatalogPhraseInEvidence(sourceEvidenceText, catalog);
+  if (!partialPhrase) return items;
+
+  return items.map(item => {
+    const canonical = canonicalizeCandidateItems([item], catalog)[0];
+    if (!canonical || canonical.resolutionState !== 'RESOLVED') return item;
+    const supportedByDistinctiveToken = distinctiveCatalogTokens(canonical, catalog)
+      .some(token => sourceWords.has(token));
+    if (supportedByDistinctiveToken) return item;
+
+    const issue = `Specific product variant is unresolved for evidence phrase "${partialPhrase}".`;
+    if (!ambiguities.includes(issue)) ambiguities.push(issue);
+    return {
+      ...item,
+      rawText: partialPhrase,
+      productName: partialPhrase,
+      matchedSku: undefined,
+      resolutionState: 'UNRESOLVED',
+    };
+  });
 }
 
 function hasSupportedValue(candidate: any, field: string): boolean {
@@ -910,6 +979,7 @@ Your mission:
    - "Order:", "Pesanan:", "Item:", "Produk:" -> extract ordered items with their explicit quantities and product names.
    - "Payment:", "Pembayaran:", "Bayar:" -> extract payment amount and method.
 3. Handle product catalog matching and normalization:
+   - Return sourceEvidenceText on every response. It must be a verbatim transcription of transaction-relevant text visible in the LATEST message or image only. Do not include prior context or catalog expansions in it.
    - The item's rawText is the evidence anchor. Copy only the literal product phrase visible in the latest message/image. Never rewrite rawText to a catalog name or add origin, roast, size, or variant words that are not visibly present.
    - Generic family terms such as "Arabica", "Arabika", "coffee", or "kopi" are insufficient to select a specific SKU when multiple catalog variants could match. Preserve that family-only rawText, omit matchedSku, and add a specific variant ambiguity. Wait for a later clarification such as a visible origin/variant/size token.
    - Match against the reseller's product catalog when the product name, variant, or keyword matches:
