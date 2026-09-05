@@ -8,6 +8,7 @@ import {
 } from '../src/lib/deterministicEngine';
 import { INITIAL_CATALOG, DEFAULT_SETTINGS } from '../src/data/mockData';
 import {
+  bindTrustedSourceEvidenceText,
   buildStructuredTransactionContext,
   fallbackDeterministicParser,
   getLatestTransactionCandidate,
@@ -532,6 +533,39 @@ assert.equal(sourceGroundedArabica.items[0].matchedSku, undefined);
 assert.equal(sourceGroundedArabica.items[0].resolutionState, 'UNRESOLVED');
 assert.match(sourceGroundedArabica.items[0].rawText, /Arabica/i);
 assert.ok(sourceGroundedArabica.ambiguities.some((issue: string) => issue.includes('Specific product variant is unresolved')));
+
+// The model's own transcript is not an independent grounding source. The
+// endpoint must replace it with literal user/OCR evidence before validation.
+const trustedInitialArabica = prepareTransactionCandidate(bindTrustedSourceEvidenceText({
+  sourceEvidenceText: 'Arabica 2 bungkus ya. Yang Gayo Premium 250gr.',
+  responseMode: 'TRANSACTION',
+  buyerName: 'Dimas Setiawan',
+  identityFactStates: { buyerName: 'EXPLICIT_VALUE', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'UNSPECIFIED' },
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus ya. Yang Gayo Premium 250gr.', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Model guessed a specific variant.',
+}, '', 'Dimas Setiawan\nMas, Arabica masih ada?\nAda mas.\nArabica 2 bungkus ya.'), INITIAL_CATALOG);
+assert.doesNotMatch(trustedInitialArabica.sourceEvidenceText, /Gayo/i);
+assert.equal(trustedInitialArabica.items[0].matchedSku, undefined);
+assert.equal(trustedInitialArabica.items[0].resolutionState, 'UNRESOLVED');
+
+const trustedClarification = prepareTransactionCandidate(bindTrustedSourceEvidenceText({
+  responseMode: 'TRANSACTION',
+  items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Gayo Premium 250gr', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Clarification resolved.',
+}, 'Yang Gayo Premium 250gr.'), INITIAL_CATALOG);
+assert.equal(trustedClarification.items[0].matchedSku, 'KOPI-GAYO-250');
+assert.equal(trustedClarification.items[0].resolutionState, 'RESOLVED');
 
 const sourceGroundedGayoClarification = prepareTransactionCandidate({
   sourceEvidenceText: 'Yang Gayo Premium 250gr.',
