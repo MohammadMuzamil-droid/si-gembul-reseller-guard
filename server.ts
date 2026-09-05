@@ -193,6 +193,10 @@ function sendSafeError(res: Response, status: number, code: string, error: strin
   res.status(status).json({ code, error });
 }
 
+export function isUidScopeAuthorized(authenticatedUid: string, requestedUid: unknown): boolean {
+  return typeof requestedUid !== 'string' || requestedUid.length === 0 || requestedUid === authenticatedUid;
+}
+
 async function verifyFirebaseRequest(req: Request, res: Response): Promise<boolean> {
   const authorization = req.get('authorization') || '';
   const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
@@ -203,7 +207,11 @@ async function verifyFirebaseRequest(req: Request, res: Response): Promise<boole
   }
 
   try {
-    await getFirebaseAdminAuth().verifyIdToken(token);
+    const decodedToken = await getFirebaseAdminAuth().verifyIdToken(token);
+    if (!isUidScopeAuthorized(decodedToken.uid, req.body?.userId)) {
+      sendSafeError(res, 403, 'UID_SCOPE_MISMATCH', 'The authenticated session cannot act for another user.');
+      return false;
+    }
     return true;
   } catch {
     console.warn('Firebase ID token verification failed', { category: 'AUTH_INVALID' });
@@ -669,6 +677,13 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   candidate.structuredFactIssues = structuredFactIssues;
   candidate.items = canonicalizeCandidateItems(Array.isArray(candidate.items) ? candidate.items : [], catalog);
   for (const item of candidate.items) {
+    const itemEvidence = `${item.rawText || ''} ${item.productName || ''}`;
+    const hasExplicitQuantity = /(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|kg|botol|pouch|unit)\b/i.test(itemEvidence) ||
+      /^\s*\d+(?:[.,]\d+)?\s+/i.test(itemEvidence);
+    if (!hasExplicitQuantity) {
+      const issue = `Quantity is unresolved for "${item.rawText || item.productName}".`;
+      if (!ambiguities.includes(issue)) ambiguities.push(issue);
+    }
     if (item.resolutionState === 'UNRESOLVED') {
       const issue = `Specific product variant is unresolved for "${item.rawText || item.productName}".`;
       if (!ambiguities.includes(issue)) ambiguities.push(issue);
@@ -1334,6 +1349,9 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
       const catMatch = matchProductFromCatalog(prodName);
 
       if (catMatch) {
+        if (!/\d+\s*(?:x|pcs?|bks|bungkus|pack|box|kg|botol|pouch|unit)\b|^\s*\d+\s+/i.test(chunk)) {
+          ambiguities.push(`Quantity is unresolved for "${chunk}".`);
+        }
         matchedItems.push({
           matchedSku: catMatch.sku,
           rawText: chunk,

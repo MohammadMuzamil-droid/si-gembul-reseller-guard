@@ -32,11 +32,26 @@ function matchesCatalogTerm(queryTerm: string, catalogTerm: string): boolean {
   if (queryTerm === catalogTerm) return true;
   if (queryTerm.length < 5 || catalogTerm.length < 5 || Math.abs(queryTerm.length - catalogTerm.length) > 1) return false;
 
-  let differences = 0;
-  for (let index = 0; index < Math.min(queryTerm.length, catalogTerm.length); index += 1) {
-    if (queryTerm[index] !== catalogTerm[index]) differences += 1;
+  let queryIndex = 0;
+  let catalogIndex = 0;
+  let edits = 0;
+  while (queryIndex < queryTerm.length && catalogIndex < catalogTerm.length) {
+    if (queryTerm[queryIndex] === catalogTerm[catalogIndex]) {
+      queryIndex += 1;
+      catalogIndex += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (queryTerm.length > catalogTerm.length) queryIndex += 1;
+    else if (catalogTerm.length > queryTerm.length) catalogIndex += 1;
+    else {
+      queryIndex += 1;
+      catalogIndex += 1;
+    }
   }
-  return differences <= 1;
+  if (queryIndex < queryTerm.length || catalogIndex < catalogTerm.length) edits += 1;
+  return edits <= 1;
 }
 
 /**
@@ -171,8 +186,9 @@ export function normalizeProduct(
 
   // 3. Explicit keywords normalization for standard product variations
   const is1kg = hasKgQuantity || cleanQuery.includes('1000g') || cleanQuery.includes('1000 g') || cleanQuery.includes('bulk');
-  const isMedium = cleanQuery.includes('medium') || cleanQuery.includes('med ');
-  const isPremium = cleanQuery.includes('premium') || cleanQuery.includes('prem ') || cleanQuery.includes('specialty');
+  const queryTerms = cleanQuery.split(/\s+/).filter(Boolean);
+  const isMedium = cleanQuery.includes('medium') || cleanQuery.includes('med ') || queryTerms.some(term => matchesCatalogTerm(term, 'medium'));
+  const isPremium = cleanQuery.includes('premium') || cleanQuery.includes('prem ') || cleanQuery.includes('specialty') || queryTerms.some(term => matchesCatalogTerm(term, 'premium'));
 
   if (cleanQuery.includes('gayo')) {
     const p = combinedCatalog.find(p => p.sku === 'KOPI-GAYO-250');
@@ -262,24 +278,27 @@ export function calculateOrderFinancials(
 
   // Shipping reimbursement is not product profit. Only the seller's unreimbursed
   // shipping burden reduces product net profit; a buyer overpayment never inflates it.
-  const sellerShippingBurden = Math.max(0, safeQuotedOngkir - safeBuyerOngkir) + safeSellerAbsorbed;
+  // quoted - buyer and sellerAbsorbed are two representations of the same
+  // seller burden. Reconcile them conservatively instead of charging both.
+  const sellerShippingBurden = Math.max(
+    Math.max(0, safeQuotedOngkir - safeBuyerOngkir),
+    safeSellerAbsorbed
+  );
   const estimatedNetProfit = estimatedGrossProfit - sellerShippingBurden - safeDiscount + safeOtherFees;
 
   // Product margin is deliberately independent from shipping collection or subsidy.
   const profitMarginPercent = subtotal > 0
     ? Math.round((estimatedGrossProfit / subtotal) * 1000) / 10
     : 0;
-  // Loss safeguard evaluation (strictly above configured threshold or negative/zero margin)
+  // Loss safeguard evaluation. A loss must strictly exceed the configured
+  // threshold; thin-margin warnings apply only to non-loss transactions.
   let hasLossWarning = false;
   let lossWarningReason = '';
 
   if (estimatedNetProfit < -maxLossWarningThreshold) {
     hasLossWarning = true;
     lossWarningReason = `Loss Alert: Order produces a loss of Rp ${Math.abs(estimatedNetProfit).toLocaleString('id-ID')}, which exceeds your configured loss threshold of Rp ${maxLossWarningThreshold.toLocaleString('id-ID')}. Human confirmation and audit trail required.`;
-  } else if (subtotal > 0 && estimatedNetProfit <= 0) {
-    hasLossWarning = true;
-    lossWarningReason = `Loss Alert: Order produces a negative or zero profit (Net Profit: Rp ${estimatedNetProfit.toLocaleString('id-ID')}). Selling price is at or below supplier settlement or shipping subsidy is too high.`;
-  } else if (subtotal > 0 && profitMarginPercent < minProfitMarginThreshold) {
+  } else if (subtotal > 0 && estimatedNetProfit >= 0 && profitMarginPercent < minProfitMarginThreshold) {
     hasLossWarning = true;
     lossWarningReason = `Thin Margin Warning: Product margin (${profitMarginPercent}%) is below your safety threshold (${minProfitMarginThreshold}%).`;
   }
@@ -298,6 +317,71 @@ export function calculateOrderFinancials(
     profitMarginPercent,
     hasLossWarning,
     lossWarningReason,
+  };
+}
+
+export type EvidenceBackupStatus = 'PENDING' | 'SUCCEEDED' | 'FAILED';
+
+export interface EvidenceRetentionDecision {
+  gracePeriodDays: number;
+  ageDays: number;
+  retainEvidence: boolean;
+  canDelete: boolean;
+  reason: 'GRACE_PERIOD_ACTIVE' | 'BACKUP_NOT_SUCCEEDED' | 'ELIGIBLE_AFTER_BACKUP';
+}
+
+/**
+ * Deterministic evidence lifecycle gate for closed orders.
+ * Evidence stays retained throughout the grace period and cannot be deleted
+ * afterwards unless its backup has completed successfully.
+ */
+export function evaluateEvidenceRetention(
+  closedAt: string | Date,
+  now: string | Date,
+  backupStatus: EvidenceBackupStatus,
+  gracePeriodDays: number = 3
+): EvidenceRetentionDecision {
+  const closedTime = new Date(closedAt).getTime();
+  const nowTime = new Date(now).getTime();
+  const safeGraceDays = Math.max(0, Number(gracePeriodDays) || 0);
+
+  if (!Number.isFinite(closedTime) || !Number.isFinite(nowTime)) {
+    return {
+      gracePeriodDays: safeGraceDays,
+      ageDays: 0,
+      retainEvidence: true,
+      canDelete: false,
+      reason: 'GRACE_PERIOD_ACTIVE',
+    };
+  }
+
+  const ageDays = Math.max(0, (nowTime - closedTime) / 86_400_000);
+  if (ageDays < safeGraceDays) {
+    return {
+      gracePeriodDays: safeGraceDays,
+      ageDays,
+      retainEvidence: true,
+      canDelete: false,
+      reason: 'GRACE_PERIOD_ACTIVE',
+    };
+  }
+
+  if (backupStatus !== 'SUCCEEDED') {
+    return {
+      gracePeriodDays: safeGraceDays,
+      ageDays,
+      retainEvidence: true,
+      canDelete: false,
+      reason: 'BACKUP_NOT_SUCCEEDED',
+    };
+  }
+
+  return {
+    gracePeriodDays: safeGraceDays,
+    ageDays,
+    retainEvidence: false,
+    canDelete: true,
+    reason: 'ELIGIBLE_AFTER_BACKUP',
   };
 }
 
@@ -348,9 +432,16 @@ export function determinePaymentStatus(
 /** Backward-compatible payment summary. Legacy VERIFIED orders are treated as settled. */
 export function getVerifiedPaymentTotal(order: ResellerOrder): number {
   if (order.payments && order.payments.length > 0) {
+    const seenEvidence = new Set<string>();
     return order.payments
       .filter(payment => payment.status === 'VERIFIED')
-      .reduce((total, payment) => total + Math.max(0, Number(payment.amount) || 0), 0);
+      .reduce((total, payment) => {
+        const normalizedReference = payment.reference?.trim().toLocaleLowerCase('id-ID');
+        const evidenceKey = normalizedReference ? `reference:${normalizedReference}` : `id:${payment.id}`;
+        if (seenEvidence.has(evidenceKey)) return total;
+        seenEvidence.add(evidenceKey);
+        return total + Math.max(0, Number(payment.amount) || 0);
+      }, 0);
   }
   return order.paymentStatus === 'VERIFIED' ? order.financials.totalPayable : 0;
 }
@@ -598,6 +689,9 @@ export function getCandidateConfirmationBlockers(
 
   for (const ambiguity of candidate.ambiguities || []) {
     if (/\b(unresolved|resolve|specific).*(product|variant)|\b(product|variant).*(unresolved|resolve)/i.test(ambiguity)) {
+      blockers.push(ambiguity);
+    }
+    if (/\b(quantity|jumlah)\b/i.test(ambiguity)) {
       blockers.push(ambiguity);
     }
   }

@@ -323,3 +323,21 @@ export async function saveUserChatHistory(userId: string, messages: AgentChatMes
     console.error('Firestore saveUserChatHistory error:', err);
   }
 }
+
+/** Create an evidence backup that must succeed before the active desk is cleared. */
+export async function saveUserChatEvidenceArchive(userId: string, messages: AgentChatMessage[]): Promise<string> {
+  const archiveId = `archive_${Date.now()}`;
+  const path = `users/${userId}/evidence_archives/${archiveId}`;
+  try {
+    await setDoc(doc(db, 'users', userId, 'evidence_archives', archiveId), sanitizeForFirestore({
+      id: archiveId,
+      userId,
+      createdAt: new Date().toISOString(),
+      reason: 'CLEAR_DESK',
+      messages,
+    }));
+    return archiveId;
+  } catch (err) {
+    return handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}

@@ -45,8 +45,8 @@ interface AgentChatDeskProps {
   settings: ResellerSettings;
   chatHistory: AgentChatMessage[];
   onSendMessage: (text: string, imageBase64?: string) => Promise<void>;
-  onOrderCreated: (order: ResellerOrder) => void;
-  onTransactionCompleted: () => void;
+  onOrderCreated: (order: ResellerOrder) => void | Promise<void>;
+  onTransactionCompleted: () => void | Promise<void>;
   onClearChat: () => void;
   onUpdateMessageCandidate?: (messageId: string, candidate: CandidateExtraction) => void;
   isProcessing: boolean;
@@ -69,9 +69,11 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
   const [imageName, setImageName] = useState<string | null>(null);
   const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
   const [editedCandidate, setEditedCandidate] = useState<CandidateExtraction | null>(null);
+  const [isConfirmingOrder, setIsConfirmingOrder] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const confirmingOrderRef = useRef(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -134,7 +136,8 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
   };
 
   // Create Order from Extracted Candidate
-  const handleConfirmOrder = (candidate: CandidateExtraction) => {
+  const handleConfirmOrder = async (candidate: CandidateExtraction) => {
+    if (confirmingOrderRef.current) return;
     const finalCandidate = editedCandidate && editingCandidateId ? editedCandidate : candidate;
     const matchedItems = matchItemsWithCatalog(
       finalCandidate.items || [],
@@ -144,11 +147,18 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
     if (getCandidateConfirmationBlockers(finalCandidate, matchedItems).length > 0) {
       return;
     }
-    const order = buildOrderFromCandidate(finalCandidate, catalog, settings, userId);
-    onOrderCreated(order);
-    onTransactionCompleted();
-    setEditingCandidateId(null);
-    setEditedCandidate(null);
+    confirmingOrderRef.current = true;
+    setIsConfirmingOrder(true);
+    try {
+      const order = buildOrderFromCandidate(finalCandidate, catalog, settings, userId);
+      await onOrderCreated(order);
+      await onTransactionCompleted();
+      setEditingCandidateId(null);
+      setEditedCandidate(null);
+    } finally {
+      confirmingOrderRef.current = false;
+      setIsConfirmingOrder(false);
+    }
   };
 
   return (
@@ -305,6 +315,7 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
                         }}
                         editedCandidate={editedCandidate}
                         onUpdateEditedCandidate={(updated) => setEditedCandidate(updated)}
+                        isConfirming={isConfirmingOrder}
                         onConfirm={() => {
                           const candToConfirm = (editingCandidateId === msg.id && editedCandidate) ? editedCandidate : msg.candidate!;
                           handleConfirmOrder(candToConfirm);
@@ -421,6 +432,7 @@ interface CandidateActionCardProps {
   editedCandidate: CandidateExtraction | null;
   onUpdateEditedCandidate: (cand: CandidateExtraction) => void;
   onConfirm: () => void;
+  isConfirming: boolean;
 }
 
 const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
@@ -432,6 +444,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
   editedCandidate,
   onUpdateEditedCandidate,
   onConfirm,
+  isConfirming,
 }) => {
   const activeCand = isEditing && editedCandidate ? editedCandidate : candidate;
 
@@ -857,16 +870,16 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
       <button
         type="button"
         onClick={onConfirm}
-        disabled={!canConfirm}
+        disabled={!canConfirm || isConfirming}
         title={canConfirm ? undefined : 'Resolve the listed details before creating an active order.'}
         className={`w-full py-2.5 px-4 text-white font-bold text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 ${
-          canConfirm
+          canConfirm && !isConfirming
             ? 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 cursor-pointer'
             : 'bg-slate-300 cursor-not-allowed'
         }`}
       >
         <CheckCircle2 className="w-4 h-4" />
-        <span>Confirm & Create Active Order</span>
+        <span>{isConfirming ? 'Creating Order...' : 'Confirm & Create Active Order'}</span>
       </button>
     </div>
   );

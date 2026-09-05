@@ -9,6 +9,7 @@ import {
   generateBuyerInvoiceText, 
   generateAdminOrderCard,
   getPaymentCompletion,
+  getVerifiedPaymentTotal,
   evaluateShipmentEligibility
 } from '../../lib/deterministicEngine';
 import { 
@@ -64,9 +65,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   };
 
   const getPaymentStatusAfterVerification = (entries: PaymentEntry[]): ResellerOrder['paymentStatus'] => {
-    const verifiedTotal = entries
-      .filter((payment) => payment.status === 'VERIFIED')
-      .reduce((total, payment) => total + payment.amount, 0);
+    const verifiedTotal = getVerifiedPaymentTotal({ ...order, payments: entries });
     return verifiedTotal >= order.financials.totalPayable ? 'VERIFIED' : 'NEEDS_PROOF';
   };
 
@@ -75,6 +74,8 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
     e.preventDefault();
     const amount = Number(paymentAmountInput.replace(/[^0-9]/g, ''));
     if (!Number.isFinite(amount) || amount <= 0 || isCancelled) return;
+    const normalizedReference = paymentReferenceInput.trim().toLocaleLowerCase('id-ID');
+    if (normalizedReference && paymentEntries.some((payment) => payment.reference?.trim().toLocaleLowerCase('id-ID') === normalizedReference)) return;
     const now = new Date().toISOString();
     const entry: PaymentEntry = {
       id: `pay_${Date.now()}`,

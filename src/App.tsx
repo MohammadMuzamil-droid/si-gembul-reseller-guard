@@ -16,7 +16,8 @@ import {
   fetchUserDailyCloses, 
   saveUserDailyClose,
   fetchUserChatHistory,
-  saveUserChatHistory
+  saveUserChatHistory,
+  saveUserChatEvidenceArchive,
 } from './lib/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
@@ -37,6 +38,7 @@ import { TutupBukuView } from './components/tutupbuku/TutupBukuView';
 import { AdvancedSettings } from './components/settings/AdvancedSettings';
 import { SiGembulMascot } from './components/mascot/SiGembulMascot';
 import { applyCustomerIdentityDecision, deriveCustomerIntelligence } from './lib/customerIntelligence';
+import { evaluateEvidenceRetention } from './lib/deterministicEngine';
 import { 
   MessageSquareText, 
   PackageCheck, 
@@ -308,10 +310,11 @@ export default function App() {
   const handleTransactionCompleted = async () => {
     if (!currentUser) return;
     let closed = false;
+    const closedAt = new Date().toISOString();
     const nextChat = [...chatHistory].reverse().map(message => {
       if (!closed && message.role === 'assistant' && message.candidate && !message.transactionClosed) {
         closed = true;
-        return { ...message, transactionClosed: true };
+        return { ...message, transactionClosed: true, transactionClosedAt: closedAt };
       }
       return message;
     }).reverse();
@@ -351,9 +354,23 @@ export default function App() {
   // Clear Chat history
   const handleClearChat = async () => {
     if (!currentUser) return;
+    const now = new Date();
+    const closedCandidates = chatHistory.filter(message => message.transactionClosed && message.candidate);
+    const gracePeriodActive = closedCandidates.some(message => {
+      const closedAt = message.transactionClosedAt || message.timestamp;
+      return evaluateEvidenceRetention(closedAt, now, 'PENDING').reason === 'GRACE_PERIOD_ACTIVE';
+    });
+    if (gracePeriodActive) {
+      showToast('Evidence retained during the 3-day safety period.');
+      return;
+    }
+
+    // Persist a separate evidence copy first. A failed write throws and leaves
+    // both local and persisted active chat untouched.
+    await saveUserChatEvidenceArchive(currentUser.uid, chatHistory);
     setChatHistory([]);
     await saveUserChatHistory(currentUser.uid, []);
-    showToast('Desk cleared.');
+    showToast('Desk cleared after evidence backup.');
   };
 
   // Save Product in Catalog
