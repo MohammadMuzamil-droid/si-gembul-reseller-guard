@@ -32,6 +32,13 @@ export interface PaymentEvidence {
   reference?: string;
 }
 
+/** Courier/tracking facts explicitly supported by the latest evidence. */
+export interface DeliveryEvidence {
+  state: 'UNSPECIFIED' | 'EXPLICIT_VALUE';
+  courierName?: string;
+  trackingNumber?: string;
+}
+
 export type PaymentStatus = 
   | 'NEEDS_PROOF'     // Payment still needs proof
   | 'VERIFIED'        // Payment verified
@@ -277,6 +284,8 @@ export interface CandidateExtraction {
   transferReference?: string;
   
   courierName?: string;
+  /** Atomic Gemini contract for courier/tracking facts. */
+  deliveryEvidence?: DeliveryEvidence;
   /** Atomic Gemini evidence contract, normalized server-side into legacy fields below. */
   shippingEvidence?: ShippingEvidence;
   quotedOngkir?: number;

@@ -243,7 +243,7 @@ const laterShippingEvidencePreservesPayment = resolveCandidateResponse({
   items: priorCandidate.items,
   paymentEvidence: { state: 'UNSPECIFIED' },
   shippingEvidence: { state: 'UNSPECIFIED' },
-  trackingNumber: 'NPX-DEMO-260903-18427',
+  deliveryEvidence: { state: 'EXPLICIT_VALUE', courierName: 'NusaParcel', trackingNumber: 'NPX-DEMO-260903-18427' },
   identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
   confidence: 0.95,
   ambiguities: [],
@@ -253,7 +253,22 @@ assert.equal(laterShippingEvidencePreservesPayment.candidate?.claimedPaymentAmou
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.paymentProofClaimed, true);
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.transferReference, 'NP-DEMO-030926-0941-6817');
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.payerName, 'Ahmad Pratama');
+assert.equal(laterShippingEvidencePreservesPayment.candidate?.courierName, 'NusaParcel');
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.trackingNumber, 'NPX-DEMO-260903-18427');
+
+const trackingWithoutCourier = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  items: priorCandidate.items,
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'EXPLICIT_VALUE', trackingNumber: 'NPX-DEMO-260903-18427' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Tracking evidence processed.',
+}, nusaPayPayerEnrichment.candidate, 'Shipping receipt evidence', true, INITIAL_CATALOG);
+assert.equal(trackingWithoutCourier.candidate?.trackingNumber, undefined);
+assert.ok((trackingWithoutCourier.candidate?.structuredFactIssues || []).some((issue: string) => issue.includes('tracking number needs')));
 
 const invalidAtomicPayment = resolveCandidateResponse({
   responseMode: 'TRANSACTION',

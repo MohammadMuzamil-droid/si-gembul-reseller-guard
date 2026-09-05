@@ -85,7 +85,16 @@ const EXTRACTION_SCHEMA: Schema = {
       required: ['state'],
       description: 'One atomic payment-evidence fact. EXPLICIT_VALUE requires a positive amount, EXPLICIT_ZERO requires amount 0, and UNSPECIFIED omits amount. Never derive payment facts from explanation prose.',
     },
-    courierName: { type: Type.STRING, description: 'Requested courier e.g. J&T Express, JNE, SiCepat, GoSend, Direct / Pickup' },
+    deliveryEvidence: {
+      type: Type.OBJECT,
+      properties: {
+        state: { type: Type.STRING, enum: ['UNSPECIFIED', 'EXPLICIT_VALUE'] },
+        courierName: { type: Type.STRING, description: 'Courier/carrier name exactly as shown in the latest evidence.' },
+        trackingNumber: { type: Type.STRING, description: 'Shipping tracking/resi number exactly as shown in the latest evidence.' },
+      },
+      required: ['state'],
+      description: 'Atomic courier/tracking contract. Use EXPLICIT_VALUE when the latest evidence shows courier or tracking facts. A tracking number requires its evidence-supported courier when visible. Use UNSPECIFIED and omit both fields when neither is evidenced.',
+    },
     shippingEvidence: {
       type: Type.OBJECT,
       properties: {
@@ -96,7 +105,6 @@ const EXTRACTION_SCHEMA: Schema = {
       required: ['state'],
       description: 'One atomic shipping-evidence fact. EXPLICIT_VALUE requires a positive amount and BUYER or SELLER. EXPLICIT_ZERO requires amount 0. UNSPECIFIED omits both amount and chargeTo.',
     },
-    trackingNumber: { type: Type.STRING, description: 'Shipping tracking / resi number shown in shipping evidence' },
     customerNotes: { type: Type.STRING, description: 'Special delivery or packaging notes' },
     identityFactStates: {
       type: Type.OBJECT,
@@ -119,7 +127,7 @@ const EXTRACTION_SCHEMA: Schema = {
       description: 'Friendly, clear conversational response from Si Gembul the cat mascot in conversational English/Indonesian explaining what was extracted and if anything is needed.' 
     },
   },
-  required: ['responseMode', 'items', 'paymentEvidence', 'shippingEvidence', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
+  required: ['responseMode', 'items', 'paymentEvidence', 'shippingEvidence', 'deliveryEvidence', 'identityFactStates', 'confidence', 'explanation', 'ambiguities'],
 };
 
 function isConversationalQuestion(message: string): boolean {
@@ -376,6 +384,60 @@ function normalizeAtomicPaymentEvidence(
   if (typeof raw.reference === 'string' && raw.reference.trim()) candidate.transferReference = raw.reference.trim();
 }
 
+/** Maps atomic courier/tracking evidence into the established candidate fields. */
+function normalizeAtomicDeliveryEvidence(
+  candidate: any,
+  addStructuredFactIssue: (issue: string) => void,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'deliveryEvidence')) return;
+
+  const raw = candidate.deliveryEvidence;
+  const invalidate = (issue: string) => {
+    delete candidate.courierName;
+    delete candidate.trackingNumber;
+    candidate.deliveryEvidence = { state: 'UNSPECIFIED' };
+    addStructuredFactIssue(issue);
+  };
+  if (!raw || typeof raw !== 'object') {
+    invalidate('Courier and tracking evidence must use the structured delivery contract.');
+    return;
+  }
+
+  const state = normalizeIdentityFactState(raw.state);
+  const courierName = typeof raw.courierName === 'string' ? raw.courierName.trim() : '';
+  const trackingNumber = typeof raw.trackingNumber === 'string' ? raw.trackingNumber.trim() : '';
+  if (!state) {
+    invalidate('Courier and tracking evidence has an invalid state.');
+    return;
+  }
+  if (state === 'UNSPECIFIED') {
+    if (courierName || trackingNumber) {
+      invalidate('Unspecified courier and tracking evidence must not carry values.');
+      return;
+    }
+    delete candidate.courierName;
+    delete candidate.trackingNumber;
+    candidate.deliveryEvidence = { state };
+    return;
+  }
+  if (!courierName && !trackingNumber) {
+    invalidate('Explicit courier and tracking evidence needs at least one supported value.');
+    return;
+  }
+  if (trackingNumber && !courierName) {
+    invalidate('A tracking number needs its evidence-supported courier before confirmation.');
+    return;
+  }
+
+  candidate.deliveryEvidence = {
+    state,
+    ...(courierName ? { courierName } : {}),
+    ...(trackingNumber ? { trackingNumber } : {}),
+  };
+  if (courierName) candidate.courierName = courierName;
+  if (trackingNumber) candidate.trackingNumber = trackingNumber;
+}
+
 /**
  * Maps the single model-facing shipping fact into the established deterministic
  * candidate fields. Legacy flat shipping fields remain supported for fallback
@@ -487,6 +549,7 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
 
   normalizeAtomicPaymentEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
+  normalizeAtomicDeliveryEvidence(candidate, addStructuredFactIssue);
 
   for (const field of EVIDENCE_FACT_FIELDS) {
     const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field);
@@ -644,6 +707,14 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
   }
 
   const mergedCandidate = { ...updatedCandidate };
+  if (mergedCandidate.deliveryEvidence?.state === 'UNSPECIFIED' && previousCandidate.deliveryEvidence?.state !== 'UNSPECIFIED') {
+    if (previousCandidate.deliveryEvidence) {
+      mergedCandidate.deliveryEvidence = previousCandidate.deliveryEvidence;
+    } else {
+      // Preserve legacy flat courier/tracking facts through the context loop.
+      delete mergedCandidate.deliveryEvidence;
+    }
+  }
   if (mergedCandidate.paymentEvidence?.state === 'UNSPECIFIED' && previousCandidate.paymentEvidence?.state !== 'UNSPECIFIED') {
     if (previousCandidate.paymentEvidence) {
       mergedCandidate.paymentEvidence = previousCandidate.paymentEvidence;
@@ -814,7 +885,8 @@ Your mission:
     - Payment amounts establish payment facts only. Never derive or override a catalog product's unit price from a transfer total, partial payment, or shipping amount. The deterministic engine owns catalog pricing.
     - Return paymentEvidence on every response. It is the only model-facing payment amount contract: { state, amount, proofClaimed, reference }. If the latest evidence explicitly shows a positive payment amount, state MUST be EXPLICIT_VALUE and amount MUST contain that number. If it explicitly shows zero, use EXPLICIT_ZERO with amount 0. If no payment amount is evidenced, use UNSPECIFIED and omit amount. Copy a visible reference exactly. Do not emit claimedPaymentAmount, paymentProofClaimed, transferReference, or factStates from Gemini.
    - If an explicit specific catalog keyword such as "Gayo" is present, choose that specific catalog product before a generic family keyword such as "Premium".
-   - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. When shipping is not evidenced, return state UNSPECIFIED and omit amount and chargeTo. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
+    - Return shippingEvidence on every response. It is the only model-facing shipping money contract: { state, amount, chargeTo }. For a positive or zero shipping fact, state and amount must agree. Use chargeTo BUYER when the evidence says an unqualified ongkir is included in a stated customer total; use SELLER only when the reseller explicitly absorbs it. When shipping is not evidenced, return state UNSPECIFIED and omit amount and chargeTo. Do not emit quotedOngkir, buyerOngkir, sellerAbsorbedOngkir, or their factStates from Gemini.
+   - Return deliveryEvidence on every response. It is the only model-facing courier/tracking contract: { state, courierName, trackingNumber }. If the latest evidence shows a courier or resi label, use EXPLICIT_VALUE and copy the visible courier and tracking number exactly. Never mention a courier or tracking number only in explanation. When neither is evidenced, use UNSPECIFIED and omit both fields. Do not emit top-level courierName or trackingNumber from Gemini.
 4. Keep buyer, payer, and recipient as three distinct identities:
    - Buyer: Person or reference code placing the order in chat.
    - Payer: Person paying the money (may be different, e.g. husband/parent/friend transfer).
@@ -836,7 +908,7 @@ Your mission:
 8. Distinguish a new or updated transaction from a conversational follow-up:
     - For a question about prior chat context, return responseMode: "CONVERSATION", items: [], and answer from the supplied prior structured transaction context. Do not invent an empty order candidate.
     - Structured transaction context includes transaction identities, payment and shipping facts, plus originalQuantity/originalUnit and normalizedPieces. Treat normalizedPieces and financials as authoritative catalog-derived values; do not re-derive or conflate them from natural-language phrasing.
-    - For a change to a prior transaction, return responseMode: "TRANSACTION". Preserve prior items and other non-stateful context needed for continuity. For buyer, payer, recipient, payment amount, and shipping, report only facts supported by the latest evidence using their state contracts; mark prior-only facts UNSPECIFIED and omit their value fields so the server can preserve established authoritative context.
+    - For a change to a prior transaction, return responseMode: "TRANSACTION". Preserve prior items and other non-stateful context needed for continuity. For buyer, payer, recipient, payment amount, shipping money, and courier/tracking, report only facts supported by the latest evidence using their state contracts; mark prior-only facts UNSPECIFIED and omit their value fields so the server can preserve established authoritative context.
     - When the latest evidence changes or adds one fact, update only that fact. Explicit zero is a supported value for shipping. Do not omit known facts from the candidate, and do not state transaction facts in explanation that are absent from the candidate.
     - For a clearly new transaction, return responseMode: "TRANSACTION" and do not merge it with an earlier order.
 
