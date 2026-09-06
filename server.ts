@@ -239,13 +239,7 @@ async function verifyFirebaseRequest(req: Request, res: Response): Promise<strin
   }
 }
 
-function quotaErrorMessage(code: NonNullable<ReturnType<typeof reservePublicJudgingQuota>['code']>): string {
-  if (code === 'AI_USER_QUOTA_EXHAUSTED') {
-    return 'Your AI evidence analysis allowance has been used. Your saved orders and deterministic tools remain available.';
-  }
-  if (code === 'AI_GLOBAL_PACING_PAUSED') {
-    return 'Live AI evidence analysis is temporarily resting to keep it available throughout judging. Your saved orders and deterministic tools remain available.';
-  }
+function quotaErrorMessage(): string {
   return 'The live AI evidence campaign allowance has been preserved for the public/judging window. Your saved orders and deterministic tools remain available.';
 }
 
@@ -254,18 +248,13 @@ function sendQuotaError(
   code: NonNullable<ReturnType<typeof reservePublicJudgingQuota>['code']>,
   quota: PublicQuotaStatus,
 ) {
-  res.status(429).json({ code, error: quotaErrorMessage(code), quota });
+  res.status(429).json({ code, error: quotaErrorMessage(), quota });
 }
 
-async function readPublicQuotaStatus(uid: string, now = Date.now()): Promise<PublicQuotaStatus> {
+async function readPublicQuotaStatus(now = Date.now()): Promise<PublicQuotaStatus> {
   const db = getQuotaFirestore();
-  const [campaignSnapshot, userSnapshot] = await Promise.all([
-    db.collection(QUOTA_CAMPAIGN_COLLECTION).doc(PUBLIC_JUDGING_QUOTA.campaignId).get(),
-    db.collection(QUOTA_USER_COLLECTION).doc(uid).get(),
-  ]);
-  const globalState = readGlobalQuotaState(campaignSnapshot.data(), now);
-  const userState = readUserQuotaState(userSnapshot.data());
-  return publicQuotaStatus(userState, globalState, now);
+  const campaignSnapshot = await db.collection(QUOTA_CAMPAIGN_COLLECTION).doc(PUBLIC_JUDGING_QUOTA.campaignId).get();
+  return publicQuotaStatus(readGlobalQuotaState(campaignSnapshot.data()), now);
 }
 
 async function reserveLiveAiQuota(uid: string, estimatedCallUnits: number, now = Date.now()) {
@@ -279,7 +268,7 @@ async function reserveLiveAiQuota(uid: string, estimatedCallUnits: number, now =
       transaction.get(userRef),
     ]);
     const reservation = reservePublicJudgingQuota(
-      readGlobalQuotaState(campaignSnapshot.data(), now),
+      readGlobalQuotaState(campaignSnapshot.data()),
       readUserQuotaState(userSnapshot.data()),
       estimatedCallUnits,
       now,
@@ -1179,7 +1168,7 @@ app.get('/api/agent/quota', async (req: Request, res: Response) => {
   if (!uid) return;
 
   try {
-    res.json({ quota: await readPublicQuotaStatus(uid) });
+    res.json({ quota: await readPublicQuotaStatus() });
   } catch {
     console.error('AI quota status read failed', { category: 'QUOTA_STATE_UNAVAILABLE' });
     sendSafeError(res, 503, 'QUOTA_STATE_UNAVAILABLE', 'AI evidence availability is temporarily unavailable. Your saved orders and deterministic tools remain available.');

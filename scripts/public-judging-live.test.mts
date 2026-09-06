@@ -14,7 +14,6 @@ const adminToken = process.env.FIRESTORE_ADMIN_TOKEN || '';
 const suffix = randomUUID().replace(/-/g, '').slice(0, 16);
 let userA: TestUser | undefined;
 let userB: TestUser | undefined;
-let userC: TestUser | undefined;
 let campaignSnapshot: any;
 
 function record(id: string, assertion: () => void) {
@@ -87,6 +86,25 @@ async function patchCampaign(fields: Record<string, unknown>) {
   if (!response.ok) throw new Error(`Campaign fixture update failed: ${response.status}`);
 }
 
+async function patchUserQuota(user: TestUser, fields: Record<string, number>) {
+  const response = await adminDocument('_public_judging_quota_users', user.localId, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ fields: {
+      campaignId: { stringValue: 'public-judging-2026-09' },
+      ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, { integerValue: String(value) }])),
+    } }),
+  });
+  if (!response.ok) throw new Error(`User quota fixture update failed: ${response.status}`);
+}
+
+async function readAdminDocument(collection: string, id: string) {
+  const response = await adminDocument(collection, id);
+  const body = await response.json();
+  if (!response.ok) throw new Error(`Document read failed for ${collection}/${id}: ${response.status}`);
+  return body;
+}
+
 function campaignNumericFields(snapshot: any): Record<string, number> {
   const allowed = ['availableCallUnits', 'lastRefillAtMs', 'campaignCallUnitsUsed', 'updatedAtMs'];
   return Object.fromEntries(allowed.flatMap((key) => {
@@ -114,55 +132,70 @@ try {
   userA = await createUser('a');
   let quotaResponse = await api(userA, '/api/agent/quota');
   let quotaBody = await quotaResponse.json() as any;
-  record('LQ-02 new authenticated UID starts with six analyses', () => assert.deepEqual([quotaResponse.status, quotaBody.quota?.analysesRemaining], [200, 6]));
+  record('LQ-02 authenticated UID receives campaign availability only', () => assert.deepEqual([quotaResponse.status, quotaBody.quota], [200, { globalAvailability: 'AVAILABLE' }]));
 
   const mismatch = await interpret(userA, { userId: 'another-uid' });
   record('LQ-03 UID mismatch is rejected before Gemini', () => assert.equal(mismatch.status, 403));
 
+  const directQuotaRead = await fetch(documentUrl('_public_judging_quota', 'public-judging-2026-09'), {
+    headers: { Authorization: `Bearer ${userA.idToken}` },
+  });
+  record('LQ-04 quota state remains server-only', () => assert.equal(directQuotaRead.status, 403));
+
+  campaignSnapshot = await readAdminDocument('_public_judging_quota', 'public-judging-2026-09');
+  await patchUserQuota(userA, { analysesUsed: 6, callUnitsUsed: 6 });
+  await patchCampaign({ availableCallUnits: 0, lastRefillAtMs: Date.now(), campaignCallUnitsUsed: 0 });
   const firstAnalysis = await interpret(userA);
   const firstBody = await firstAnalysis.json() as any;
-  record('LQ-04 allowed live analysis reaches the existing Gemini path and decrements quota', () => {
+  const afterLegacyLimits = await readAdminDocument('_public_judging_quota', 'public-judging-2026-09');
+  const afterUserLimit = await readAdminDocument('_public_judging_quota_users', userA.localId);
+  record('LQ-05 old per-UID, daily, and burst limits no longer block live Gemini', () => {
     assert.equal(firstAnalysis.status, 200);
     assert.ok(['gemini', 'fallback'].includes(firstBody.provider));
-    assert.equal(firstBody.quota?.analysesRemaining, 5);
+    assert.equal(firstBody.quota?.globalAvailability, 'AVAILABLE');
+    assert.equal(Number(afterLegacyLimits.fields?.campaignCallUnitsUsed?.integerValue), 1);
+    assert.deepEqual([
+      Number(afterUserLimit.fields?.analysesUsed?.integerValue),
+      Number(afterUserLimit.fields?.callUnitsUsed?.integerValue),
+    ], [7, 7]);
   });
 
   userA = await signIn(userA);
   quotaResponse = await api(userA, '/api/agent/quota');
   quotaBody = await quotaResponse.json() as any;
-  record('LQ-05 logout/login-style token renewal preserves UID allowance', () => assert.equal(quotaBody.quota?.analysesRemaining, 5));
+  record('LQ-06 logout/login-style token renewal remains accepted', () => assert.deepEqual([quotaResponse.status, quotaBody.quota?.globalAvailability], [200, 'AVAILABLE']));
 
-  const concurrent = await Promise.all(Array.from({ length: 6 }, () => interpret(userA!)));
+  await patchCampaign(campaignNumericFields(campaignSnapshot));
+  userB = await createUser('b');
+  await patchCampaign({ campaignCallUnitsUsed: 219 });
+  const concurrent = await Promise.all([interpret(userA), interpret(userB)]);
   const concurrentBodies = await Promise.all(concurrent.map(response => response.json() as Promise<any>));
   const allowed = concurrent.filter(response => response.status === 200).length;
-  const exhausted = concurrentBodies.filter(body => body.code === 'AI_USER_QUOTA_EXHAUSTED').length;
-  record('LQ-06 parallel requests cannot overspend one UID', () => assert.deepEqual([allowed, exhausted], [5, 1]));
+  const blocked = concurrentBodies.filter(body => body.code === 'AI_CAMPAIGN_CEILING_REACHED').length;
+  const afterConcurrent = await readAdminDocument('_public_judging_quota', 'public-judging-2026-09');
+  record('LQ-07 simultaneous users cannot overspend the hard ceiling', () => {
+    assert.deepEqual([allowed, blocked], [1, 1]);
+    assert.equal(Number(afterConcurrent.fields?.campaignCallUnitsUsed?.integerValue), 220);
+  });
 
-  quotaResponse = await api(userA, '/api/agent/quota');
-  quotaBody = await quotaResponse.json() as any;
-  record('LQ-07 exhausted UID reports zero remaining after refresh', () => assert.equal(quotaBody.quota?.analysesRemaining, 0));
-
-  const campaignRead = await adminDocument('_public_judging_quota', 'public-judging-2026-09');
-  campaignSnapshot = await campaignRead.json();
-  if (!campaignRead.ok) throw new Error(`Campaign state read failed: ${campaignRead.status}`);
-
-  userB = await createUser('b');
-  await patchCampaign({ availableCallUnits: 0, lastRefillAtMs: Date.now() });
-  const paced = await interpret(userB);
-  const pacedBody = await paced.json() as any;
-  record('LQ-08 global pacing pause rejects before Gemini', () => assert.deepEqual([paced.status, pacedBody.code], [429, 'AI_GLOBAL_PACING_PAUSED']));
-  await patchCampaign(campaignNumericFields(campaignSnapshot));
-
-  userC = await createUser('c');
-  const restoredRead = await adminDocument('_public_judging_quota', 'public-judging-2026-09');
-  const restoredSnapshot = await restoredRead.json();
-  await patchCampaign({ campaignCallUnitsUsed: 220 });
-  const ceiling = await interpret(userC);
+  const beforeCeilingUsers = await Promise.all([
+    readAdminDocument('_public_judging_quota_users', userA.localId),
+    readAdminDocument('_public_judging_quota_users', userB.localId).catch(() => ({ fields: {} })),
+  ]);
+  const ceiling = await interpret(userB);
   const ceilingBody = await ceiling.json() as any;
-  record('LQ-09 campaign ceiling rejects before Gemini', () => assert.deepEqual([ceiling.status, ceilingBody.code], [429, 'AI_CAMPAIGN_CEILING_REACHED']));
-  await patchCampaign(campaignNumericFields(restoredSnapshot));
+  const afterCeilingCampaign = await readAdminDocument('_public_judging_quota', 'public-judging-2026-09');
+  const afterCeilingUsers = await Promise.all([
+    readAdminDocument('_public_judging_quota_users', userA.localId),
+    readAdminDocument('_public_judging_quota_users', userB.localId).catch(() => ({ fields: {} })),
+  ]);
+  record('LQ-08 hard ceiling rejects before Gemini and spends no counter unit', () => {
+    assert.deepEqual([ceiling.status, ceilingBody.code], [429, 'AI_CAMPAIGN_CEILING_REACHED']);
+    assert.equal(Number(afterCeilingCampaign.fields?.campaignCallUnitsUsed?.integerValue), 220);
+    assert.deepEqual(afterCeilingUsers.map((body: any) => body.fields), beforeCeilingUsers.map((body: any) => body.fields));
+  });
 
-  record('LQ-10 deterministic invoice remains usable independently of live AI quota', () => {
+  record('LQ-09 deterministic invoice remains usable independently of live AI quota', () => {
     const invoice = generateBuyerInvoiceText({ buyer: { name: 'Quota Test', phone: '' }, recipient: { name: 'Quota Test', phone: '', address: '', city: '' }, shipping: { courierName: 'Pickup', buyerOngkir: 0 }, financials: { subtotal: 50000, totalPayable: 50000, discount: 0 }, paymentMethod: 'TRANSFER', paymentStatus: 'NEEDS_PROOF', items: [{ name: 'Premium', quantity: 2, totalPrice: 50000 }], orderNumber: 'SGB-QUOTA', createdAt: '2026-09-06T00:00:00.000Z' } as any, DEFAULT_SETTINGS);
     assert.match(invoice, /TOTAL TAGIHAN/);
   });
@@ -172,10 +205,10 @@ try {
   if (campaignSnapshot?.fields) {
     await patchCampaign(campaignNumericFields(campaignSnapshot)).catch(() => undefined);
   }
-  await Promise.all([deleteUserQuota(userA), deleteUserQuota(userB), deleteUserQuota(userC)]);
-  await Promise.all([deleteAccount(userA), deleteAccount(userB), deleteAccount(userC)]);
+  await Promise.all([deleteUserQuota(userA), deleteUserQuota(userB)]);
+  await Promise.all([deleteAccount(userA), deleteAccount(userB)]);
 }
 
-const summary = { phase: 'post-matrix-public-judging-live', baseUrl, pass: results.filter((result) => result.status === 'PASS').length, fail: results.filter((result) => result.status === 'FAIL').length, liveGeminiCalls: 6, temporaryAccountsDeleted: true, results };
+const summary = { phase: 'post-matrix-budget-fuse-live', baseUrl, pass: results.filter((result) => result.status === 'PASS').length, fail: results.filter((result) => result.status === 'FAIL').length, liveGeminiCalls: 2, temporaryAccountsDeleted: true, results };
 console.log(JSON.stringify(summary, null, 2));
 process.exit(summary.fail ? 1 : 0);

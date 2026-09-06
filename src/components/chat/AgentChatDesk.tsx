@@ -51,7 +51,7 @@ interface AgentChatDeskProps {
   onClearChat: () => void;
   onUpdateMessageCandidate?: (messageId: string, candidate: CandidateExtraction) => void;
   isProcessing: boolean;
-  aiQuota: { analysesRemaining: number; globalAvailability: 'AVAILABLE' | 'TEMPORARILY_UNAVAILABLE' | 'CAMPAIGN_CEILING_REACHED' } | null;
+  aiQuota: { globalAvailability: 'AVAILABLE' | 'CAMPAIGN_CEILING_REACHED' } | null;
 }
 
 export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
@@ -186,15 +186,9 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
             <p className="text-xs text-slate-500">
               Send free-form chat, customer notes, or payment evidence
             </p>
-            {aiQuota && (
-              <p className={`mt-1 text-[11px] font-semibold ${
-                aiQuota.globalAvailability === 'AVAILABLE' ? 'text-emerald-700' : 'text-amber-800'
-              }`}>
-                {aiQuota.globalAvailability === 'AVAILABLE'
-                  ? `AI evidence analyses remaining: ${aiQuota.analysesRemaining}`
-                  : aiQuota.globalAvailability === 'TEMPORARILY_UNAVAILABLE'
-                    ? 'Live AI evidence analysis is temporarily resting; your deterministic tools stay available.'
-                    : 'Live AI evidence analysis is unavailable for this campaign; your deterministic tools stay available.'}
+            {aiQuota?.globalAvailability === 'CAMPAIGN_CEILING_REACHED' && (
+              <p className="mt-1 text-[11px] font-semibold text-amber-800">
+                Live AI evidence analysis is unavailable for this campaign; your deterministic tools stay available.
               </p>
             )}
           </div>

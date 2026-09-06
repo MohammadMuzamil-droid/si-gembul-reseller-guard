@@ -4,7 +4,6 @@ import { formatSignedRupiah } from '../src/lib/formatters';
 import {
   PUBLIC_JUDGING_QUOTA,
   defaultGlobalQuotaState,
-  refillGlobalQuotaState,
   reservePublicJudgingQuota,
   type UserQuotaState,
 } from '../src/lib/publicJudgingQuota';
@@ -22,50 +21,53 @@ function scenario(id: string, assertion: () => void) {
 
 const startedAt = Date.parse('2026-09-06T06:00:00.000Z');
 
-scenario('Q-01 per-UID allowance is exactly six analyses', () => {
-  let global = defaultGlobalQuotaState(startedAt);
-  let user: UserQuotaState = { analysesUsed: 0, callUnitsUsed: 0 };
-  for (let i = 0; i < 6; i += 1) {
+scenario('Q-01 prior six-analysis per-UID limit no longer blocks', () => {
+  let global = defaultGlobalQuotaState();
+  let user: UserQuotaState = { analysesUsed: 6, callUnitsUsed: 6 };
+  for (let i = 0; i < 7; i += 1) {
     const reservation = reservePublicJudgingQuota(global, user, 1, startedAt + i);
     assert.equal(reservation.allowed, true);
     global = reservation.nextGlobalState;
     user = reservation.nextUserState;
   }
-  const seventh = reservePublicJudgingQuota(global, user, 1, startedAt + 7);
-  assert.deepEqual([seventh.allowed, seventh.code, seventh.status.analysesRemaining], [false, 'AI_USER_QUOTA_EXHAUSTED', 0]);
+  assert.deepEqual([user.analysesUsed, global.campaignCallUnitsUsed], [13, 7]);
 });
 
 scenario('Q-02 image analysis reserves two actual-call units', () => {
-  const reservation = reservePublicJudgingQuota(defaultGlobalQuotaState(startedAt), { analysesUsed: 0, callUnitsUsed: 0 }, 2, startedAt);
-  assert.deepEqual([reservation.allowed, reservation.nextGlobalState.availableCallUnits, reservation.nextUserState.callUnitsUsed], [true, 22, 2]);
+  const reservation = reservePublicJudgingQuota(defaultGlobalQuotaState(), { analysesUsed: 0, callUnitsUsed: 0 }, 2, startedAt);
+  assert.deepEqual([reservation.allowed, reservation.nextGlobalState.campaignCallUnitsUsed, reservation.nextUserState.callUnitsUsed], [true, 2, 2]);
 });
 
-scenario('Q-03 paced refill carries over but never exceeds burst capacity', () => {
-  const depleted = { availableCallUnits: 1, lastRefillAtMs: startedAt, campaignCallUnitsUsed: 10 };
-  const afterTwoDays = refillGlobalQuotaState(depleted, startedAt + (2 * PUBLIC_JUDGING_QUOTA.dayMs));
-  assert.equal(afterTwoDays.availableCallUnits, 17);
-  const afterTenDays = refillGlobalQuotaState(depleted, startedAt + (10 * PUBLIC_JUDGING_QUOTA.dayMs));
-  assert.equal(afterTenDays.availableCallUnits, PUBLIC_JUDGING_QUOTA.globalBurstCallUnits);
+scenario('Q-03 prior daily pacing and burst state no longer block', () => {
+  let global = { campaignCallUnitsUsed: 0, availableCallUnits: 0, lastRefillAtMs: startedAt };
+  let user: UserQuotaState = { analysesUsed: 99, callUnitsUsed: 99 };
+  for (let i = 0; i < 25; i += 1) {
+    const reservation = reservePublicJudgingQuota(global, user, 1, startedAt + i);
+    assert.equal(reservation.allowed, true);
+    global = { ...global, ...reservation.nextGlobalState };
+    user = reservation.nextUserState;
+  }
+  assert.equal(global.campaignCallUnitsUsed, 25);
 });
 
-scenario('Q-04 temporary global exhaustion rejects before a live request', () => {
+scenario('Q-04 campaign ceiling cannot be overspent', () => {
   const reservation = reservePublicJudgingQuota(
-    { availableCallUnits: 0, lastRefillAtMs: startedAt, campaignCallUnitsUsed: 12 },
-    { analysesUsed: 0, callUnitsUsed: 0 },
-    1,
-    startedAt + 1,
-  );
-  assert.deepEqual([reservation.allowed, reservation.code, reservation.nextGlobalState.campaignCallUnitsUsed], [false, 'AI_GLOBAL_PACING_PAUSED', 12]);
-});
-
-scenario('Q-05 campaign ceiling cannot be overspent', () => {
-  const reservation = reservePublicJudgingQuota(
-    { availableCallUnits: 24, lastRefillAtMs: startedAt, campaignCallUnitsUsed: 219 },
+    { campaignCallUnitsUsed: 219 },
     { analysesUsed: 0, callUnitsUsed: 0 },
     2,
     startedAt,
   );
   assert.deepEqual([reservation.allowed, reservation.code, reservation.status.globalAvailability], [false, 'AI_CAMPAIGN_CEILING_REACHED', 'CAMPAIGN_CEILING_REACHED']);
+});
+
+scenario('Q-05 campaign end remains an operational hard stop', () => {
+  const reservation = reservePublicJudgingQuota(
+    { campaignCallUnitsUsed: 0 },
+    { analysesUsed: 0, callUnitsUsed: 0 },
+    1,
+    PUBLIC_JUDGING_QUOTA.campaignEndsAtMs + 1,
+  );
+  assert.deepEqual([reservation.allowed, reservation.code], [false, 'AI_CAMPAIGN_CEILING_REACHED']);
 });
 
 scenario('F-01 signed Rupiah formats positive, zero, and negative values naturally', () => {
@@ -78,6 +80,6 @@ scenario('F-02 thin-margin and loss safeguards keep their financial truth', () =
   assert.deepEqual([thin.estimatedNetProfit, thin.hasLossWarning, loss.estimatedNetProfit, loss.hasLossWarning], [15000, true, -60000, true]);
 });
 
-const summary = { phase: 'post-matrix-public-judging-readiness', pass: results.filter((result) => result.status === 'PASS').length, fail: results.filter((result) => result.status === 'FAIL').length, results };
+const summary = { phase: 'post-matrix-budget-fuse-simplification', pass: results.filter((result) => result.status === 'PASS').length, fail: results.filter((result) => result.status === 'FAIL').length, results };
 console.log(JSON.stringify(summary, null, 2));
 process.exit(summary.fail ? 1 : 0);

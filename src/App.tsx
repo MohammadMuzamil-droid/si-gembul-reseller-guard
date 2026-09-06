@@ -55,8 +55,7 @@ import {
 } from 'lucide-react';
 
 type AiQuotaStatus = {
-  analysesRemaining: number;
-  globalAvailability: 'AVAILABLE' | 'TEMPORARILY_UNAVAILABLE' | 'CAMPAIGN_CEILING_REACHED';
+  globalAvailability: 'AVAILABLE' | 'CAMPAIGN_CEILING_REACHED';
 };
 
 export default function App() {
@@ -296,8 +295,6 @@ export default function App() {
         AUTH_INVALID: 'Your secure session could not be verified. Please sign in again.',
         AI_UNAVAILABLE: 'Temporary AI service issue. Nothing was saved. Please try again.',
         AI_RESPONSE_INVALID: 'Temporary AI service issue. Nothing was saved. Please try again.',
-        AI_USER_QUOTA_EXHAUSTED: 'You have used your six AI evidence analyses for this account. Your saved orders and deterministic tools remain available.',
-        AI_GLOBAL_PACING_PAUSED: 'Live AI evidence analysis is temporarily resting to stay available throughout judging. Your saved orders and deterministic tools remain available.',
         AI_CAMPAIGN_CEILING_REACHED: 'The live AI evidence allowance has been preserved for the campaign window. Your saved orders and deterministic tools remain available.',
         QUOTA_STATE_UNAVAILABLE: 'AI evidence availability is temporarily unavailable. Your saved orders and deterministic tools remain available.',
         INTERNAL_ERROR: 'Temporary service issue. Nothing was saved. Please try again.',

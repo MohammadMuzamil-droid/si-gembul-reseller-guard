@@ -57,16 +57,10 @@ try {
   original = await read.json();
   if (!read.ok) throw new Error(`Campaign state read failed: ${read.status}`);
 
-  await setCampaign({ availableCallUnits: 0, lastRefillAtMs: Date.now() });
-  const paced = await rejectedInterpret();
-  record('GL-01 global pacing pause returns 429 before Gemini', () => assert.deepEqual([paced.status, paced.body.code], [429, 'AI_GLOBAL_PACING_PAUSED']));
-  await setCampaign(numericFields(original));
-
-  const restored = await fetch(campaignUrl, { headers: { Authorization: `Bearer ${adminToken}` } }).then((response) => response.json());
   await setCampaign({ campaignCallUnitsUsed: 220 });
   const ceiling = await rejectedInterpret();
-  record('GL-02 campaign ceiling returns 429 before Gemini', () => assert.deepEqual([ceiling.status, ceiling.body.code], [429, 'AI_CAMPAIGN_CEILING_REACHED']));
-  await setCampaign(numericFields(restored));
+  record('GL-01 campaign ceiling returns 429 before Gemini', () => assert.deepEqual([ceiling.status, ceiling.body.code], [429, 'AI_CAMPAIGN_CEILING_REACHED']));
+  await setCampaign(numericFields(original));
 } catch (error) {
   results.push({ id: 'HARNESS', status: 'FAIL', detail: error instanceof Error ? error.message : String(error) });
 } finally {
