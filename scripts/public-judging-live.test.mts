@@ -196,7 +196,7 @@ try {
   });
 
   record('LQ-09 deterministic invoice remains usable independently of live AI quota', () => {
-    const invoice = generateBuyerInvoiceText({ buyer: { name: 'Quota Test', phone: '' }, recipient: { name: 'Quota Test', phone: '', address: '', city: '' }, shipping: { courierName: 'Pickup', buyerOngkir: 0 }, financials: { subtotal: 50000, totalPayable: 50000, discount: 0 }, paymentMethod: 'TRANSFER', paymentStatus: 'NEEDS_PROOF', items: [{ name: 'Premium', quantity: 2, totalPrice: 50000 }], orderNumber: 'SGB-QUOTA', createdAt: '2026-09-06T00:00:00.000Z' } as any, DEFAULT_SETTINGS);
+    const invoice = generateBuyerInvoiceText({ buyer: { name: 'Quota Test', phone: '' }, recipient: { name: 'Quota Test', phone: '', address: '', city: '' }, shipping: { courierName: 'Pickup', buyerOngkir: 0 }, financials: { subtotal: 50000, buyerOngkir: 0, totalPayable: 50000, discount: 0 }, paymentMethod: 'TRANSFER', paymentStatus: 'NEEDS_PROOF', items: [{ name: 'Premium', quantity: 2, totalPrice: 50000 }], orderNumber: 'SGB-QUOTA', createdAt: '2026-09-06T00:00:00.000Z' } as any, DEFAULT_SETTINGS);
     assert.match(invoice, /TOTAL TAGIHAN/);
   });
 } catch (error) {
