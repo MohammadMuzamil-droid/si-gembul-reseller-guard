@@ -229,7 +229,15 @@ scenario('ID-12', () => {
   assert.equal(next.claimedPaymentAmount, undefined);
 });
 
-scenario('PR-01', () => assert.equal(normalizeProduct('Premium 250g', undefined, INITIAL_CATALOG)?.sku, 'COFFEE-PREM-250'));
+scenario('PR-01', () => {
+  assert.equal(normalizeProduct('Premium 250g', undefined, INITIAL_CATALOG)?.sku, 'COFFEE-PREM-250');
+  const explicitPiece = prepared({
+    sourceEvidenceText: 'Retry: Customer: Recovery Test. Order: Premium 1 pcs. Payment: transfer. Delivery: pickup.',
+    items: [{ matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 1 pcs', productName: 'Premium coffee (250g)', quantity: 1 }],
+  });
+  assert.equal(explicitPiece.items[0].resolutionState, 'RESOLVED');
+  assert.ok(!explicitPiece.ambiguities.some((issue: string) => /specific product variant/i.test(issue)));
+});
 scenario('PR-02', () => {
   const c = prepared({ sourceEvidenceText: 'Arabica 2 bungkus', items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus', productName: 'Arabica', quantity: 2 }] });
   assert.equal(c.items[0].resolutionState, 'UNRESOLVED');
