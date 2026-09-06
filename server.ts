@@ -622,6 +622,7 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   normalizeAtomicPaymentEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicDeliveryEvidence(candidate, addStructuredFactIssue);
+  reconcileExplicitIdentityFactsFromSource(candidate);
 
   for (const field of EVIDENCE_FACT_FIELDS) {
     const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field);
@@ -699,6 +700,46 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   }
   candidate.ambiguities = ambiguities;
   return candidate;
+}
+
+const IDENTITY_SOURCE_BOUNDARY_LABELS = [
+  'customer', 'pelanggan', 'buyer', 'pembeli', 'order', 'pesanan', 'item', 'produk',
+  'payer', 'sender', 'pengirim', 'recipient', 'penerima', 'address', 'alamat',
+  'payment', 'pembayaran', 'amount', 'jumlah', 'courier', 'kurir', 'resi',
+  'shipping', 'ongkir', 'reference', 'referensi',
+] as const;
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractExplicitLabeledIdentity(source: string, labels: readonly string[]): string | undefined {
+  const labelPattern = labels.map(escapeRegex).join('|');
+  const boundaryPattern = IDENTITY_SOURCE_BOUNDARY_LABELS.map(escapeRegex).join('|');
+  const match = source.match(new RegExp(
+    `(?:^|\\s)(?:${labelPattern})\\s*[:=]\\s*(.+?)(?=\\s+(?:${boundaryPattern})\\s*[:=]|$)`,
+    'i',
+  ));
+  const value = match?.[1]?.replace(/\s+/g, ' ').trim();
+  if (!value || /^\[(?:unreadable|redacted|hidden)\]$/i.test(value)) return undefined;
+  return value;
+}
+
+/** Recover only exact labeled identities from the trusted latest evidence text. */
+function reconcileExplicitIdentityFactsFromSource(candidate: any): void {
+  if (typeof candidate.sourceEvidenceText !== 'string' || !candidate.sourceEvidenceText.trim()) return;
+  const identities: Array<{ field: 'buyerName' | 'payerName' | 'recipientName'; labels: readonly string[] }> = [
+    { field: 'buyerName', labels: ['customer', 'pelanggan', 'buyer', 'pembeli'] },
+    { field: 'payerName', labels: ['payer', 'sender', 'pengirim'] },
+    { field: 'recipientName', labels: ['recipient', 'penerima'] },
+  ];
+
+  for (const identity of identities) {
+    if (normalizeIdentityFactState(candidate.identityFactStates?.[identity.field]) !== 'EXPLICIT_VALUE') continue;
+    if (typeof candidate[identity.field] === 'string' && candidate[identity.field].trim()) continue;
+    const exactValue = extractExplicitLabeledIdentity(candidate.sourceEvidenceText, identity.labels);
+    if (exactValue) candidate[identity.field] = exactValue;
+  }
 }
 
 /**

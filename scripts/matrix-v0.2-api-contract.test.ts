@@ -179,6 +179,15 @@ scenario('ID-03', () => {
 scenario('ID-04', () => {
   const c = prepared({ payerName: 'Ahmad', recipientName: 'Rina', identityFactStates: { buyerName: 'EXPLICIT_VALUE', payerName: 'EXPLICIT_VALUE', recipientName: 'EXPLICIT_VALUE' } });
   assert.deepEqual([c.buyerName, c.payerName, c.recipientName], ['Siti', 'Ahmad', 'Rina']);
+
+  const recovered = prepared({
+    sourceEvidenceText: 'CUSTOMER CHAT Buyer: Rina Order: Premium 2 pcs Payer: Hendra Recipient: Ibu Siti Address: Jl. Mawar No. 10, Garut Payment: transfer Rp50.000',
+    buyerName: 'Rina',
+    payerName: undefined,
+    recipientName: undefined,
+    identityFactStates: { buyerName: 'EXPLICIT_VALUE', payerName: 'EXPLICIT_VALUE', recipientName: 'EXPLICIT_VALUE' },
+  });
+  assert.deepEqual([recovered.buyerName, recovered.payerName, recovered.recipientName], ['Rina', 'Hendra', 'Ibu Siti']);
 });
 scenario('ID-05', () => {
   const prior = prepared({ payerName: 'Ahmad', identityFactStates: { buyerName: 'EXPLICIT_VALUE', payerName: 'EXPLICIT_VALUE', recipientName: 'EXPLICIT_VALUE' } });
