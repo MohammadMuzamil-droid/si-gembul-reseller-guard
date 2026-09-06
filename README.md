@@ -82,6 +82,24 @@ The deployed runtime service identity has `roles/secretmanager.secretAccessor` o
 - **Stability:** deterministic calculations, focused regression tests, explicit error handling for non-JSON service responses, and no automatic duplicate-producing retries.
 - **Security:** authenticated UID isolation, deny-by-default Firestore rules, server-side secret handling, and confirmation safeguards for incomplete or ambiguous data.
 
+## Final validated baseline — 6 September 2026
+
+The Matrix v0.2 engineering campaign completed **147/147 scenarios PASS**, with **0 FAIL, 0 BLOCKED, and 0 NOT RUN**. The validated coverage spans evidence/input, identity, catalog and product grounding, pricing and financials, shipping, payment, multi-turn context, order lifecycle, Customer Intelligence, security, stability/recovery, usability, and Indonesian reseller context.
+
+Post-Matrix public/judging readiness was subsequently verified without changing the validated business or Golden Demo logic. The production application preserves Firebase authentication, per-UID Firestore isolation, server-side Gemini access through Secret Manager, deterministic financial authority, and transactional server-side protection for Gemini campaign usage.
+
+The latest budget-protection policy intentionally uses a **hard campaign budget fuse only**: the earlier per-UID six-analysis limit, daily refill, and carry-over/burst pacing were removed so a legitimate evaluator is not interrupted by an arbitrary user quota. The campaign hard ceiling remains **220 Gemini call units through 30 September 2026, 23:59:59 WIB**. Requests rejected by the hard ceiling do not invoke Gemini, while deterministic workspace functions remain available.
+
+The final production-readiness regression included focused quota/formatter tests, TypeScript and production builds, production admission/security checks, deterministic invoice verification, Golden Demo/core transaction checks, and the previously validated Matrix baseline. The latest implementation also uses signed Rupiah formatting so positive, zero, and negative profit values render unambiguously.
+
+Current repository baseline after the budget-fuse simplification:
+
+- Implementation commit: `89fdc2c88e788df6d0920a8637106597a6be08da`
+- Verification fixture commit: `c7d8e4534cccec106782ee48e753e0ad58bc6f58`
+- Historical Matrix v0.2 validated baseline: `eb7b0a113d91db52ba286263772a27f8711d6d0e`
+
+The 147-scenario Matrix was not rerun after the budget-fuse simplification because the change was scoped to Gemini admission/UI messaging and focused verification; the validated business and Golden Demo logic was not changed.
+
 ## Local setup
 
 Prerequisites: Node.js, pnpm, a Firebase project configured for Authentication and Firestore, and a Gemini API key for local development.
@@ -132,4 +150,4 @@ The project intentionally does not claim automated customer outreach or guarante
 
 ## Verification record
 
-The repository includes [Phase 3B soft-close evidence](evidence/Si_Gembul_Phase3B_Soft_Close_2026-09-03.md), including the deployed application checkpoint, Customer Intelligence acceptance evidence, and remaining submission actions.
+The repository includes [Phase 3B soft-close evidence](evidence/Si_Gembul_Phase3B_Soft_Close_2026-09-03.md), including the deployed application checkpoint and Customer Intelligence acceptance evidence. The README baseline above records the later Matrix v0.2 and post-Matrix public/judging-readiness checkpoints through 6 September 2026.
