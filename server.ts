@@ -796,14 +796,23 @@ function distinctiveCatalogTokens(item: any, catalog: any[]): string[] {
   );
 }
 
-function explicitUnitSupportsCatalogResolution(item: any, canonical: any, catalog: any[]): boolean {
-  const phrase = `${item?.rawText || ''} ${item?.productName || ''}`;
+function explicitUnitSupportsCatalogResolution(canonical: any, sourceEvidenceText: string, catalog: any[]): boolean {
+  const phrase = sourceEvidenceText;
   const product = catalog.find(entry => entry.sku === canonical?.matchedSku);
   const pieceEquivalent = Math.max(1, Number(product?.pieceEquivalent) || (canonical?.matchedSku?.endsWith('-1KG') ? 4 : 1));
-  if (pieceEquivalent > 1 || canonical?.matchedSku?.endsWith('-1KG')) {
-    return /(?:^|\s)\d+(?:[.,]\d+)?\s*kg\b/i.test(phrase);
-  }
-  return /(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|botol|pouch|unit)\b/i.test(phrase);
+  const hasCompatibleUnit = pieceEquivalent > 1 || canonical?.matchedSku?.endsWith('-1KG')
+    ? /(?:^|\s)\d+(?:[.,]\d+)?\s*kg\b/i.test(phrase)
+    : /(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|botol|pouch|unit)\b/i.test(phrase);
+  if (!hasCompatibleUnit) return false;
+
+  const sourceWords = new Set(evidenceWords(sourceEvidenceText));
+  const genericTokens = new Set(['kopi', 'coffee', 'arabica', 'arabika', 'pack', 'pcs', 'bungkus', 'box', 'botol', 'pouch', 'unit', 'gram', 'kg']);
+  return evidenceWords(`${product?.name || ''} ${product?.sku || ''}`).some(token =>
+    token.length >= 3 &&
+    !/^\d+$/.test(token) &&
+    !genericTokens.has(token) &&
+    sourceWords.has(token)
+  );
 }
 
 /** Reject a specific catalog resolution that is unsupported by the literal latest evidence. */
@@ -818,7 +827,7 @@ function groundCandidateItemsInSource(items: any[], sourceEvidenceText: unknown,
     if (!canonical || canonical.resolutionState !== 'RESOLVED') return item;
     const supportedByDistinctiveToken = distinctiveCatalogTokens(canonical, catalog)
       .some(token => sourceWords.has(token));
-    if (supportedByDistinctiveToken || explicitUnitSupportsCatalogResolution(item, canonical, catalog)) return item;
+    if (supportedByDistinctiveToken || explicitUnitSupportsCatalogResolution(canonical, sourceEvidenceText, catalog)) return item;
 
     const issue = `Specific product variant is unresolved for evidence phrase "${partialPhrase}".`;
     if (!ambiguities.includes(issue)) ambiguities.push(issue);

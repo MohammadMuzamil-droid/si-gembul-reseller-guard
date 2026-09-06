@@ -241,6 +241,12 @@ scenario('PR-01', () => {
 scenario('PR-02', () => {
   const c = prepared({ sourceEvidenceText: 'Arabica 2 bungkus', items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus', productName: 'Arabica', quantity: 2 }] });
   assert.equal(c.items[0].resolutionState, 'UNRESOLVED');
+  const hallucinatedExpansion = prepared({
+    sourceEvidenceText: 'Dimas Setiawan\nMas, Arabica masih ada?\nAda mas.\nArabica 2 bungkus ya.',
+    items: [{ matchedSku: 'KOPI-GAYO-250', rawText: 'Arabica 2 bungkus ya. Yang Gayo Premium 250gr.', productName: 'Kopi Arabika Gayo Aceh 250g', quantity: 2 }],
+  });
+  assert.equal(hallucinatedExpansion.items[0].matchedSku, undefined);
+  assert.equal(hallucinatedExpansion.items[0].resolutionState, 'UNRESOLVED');
 });
 scenario('PR-03', () => {
   const c = prepared({ sourceEvidenceText: 'Gayo Premium 250gr', items: [{ rawText: 'Gayo Premium 250gr', productName: 'Gayo Premium', quantity: 2 }] });
