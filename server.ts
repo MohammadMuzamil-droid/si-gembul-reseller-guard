@@ -1259,7 +1259,7 @@ Store Context:
       candidateData = JSON.parse(responseText);
     } catch (parseErr) {
       console.warn('Gemini response parsing failed', { provider: 'gemini', category: 'AI_RESPONSE_INVALID' });
-      candidateData = { ...fallbackDeterministicParser(message, catalog), responseMode: 'TRANSACTION' };
+      candidateData = { ...fallbackDeterministicParser(trustedSourceEvidenceText, catalog), responseMode: 'TRANSACTION' };
       provider = 'fallback';
     }
     candidateData = bindTrustedSourceEvidenceText(candidateData, message, imageTranscription);
@@ -1525,6 +1525,11 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   if (!detectedName) {
     detectedName = 'Pelanggan Reseller';
   }
+  const exactBuyerName = extractExplicitLabeledIdentity(text, ['customer', 'pelanggan', 'buyer', 'pembeli']);
+  const exactPayerName = extractExplicitLabeledIdentity(text, ['payer', 'sender', 'pengirim']);
+  const exactRecipientName = extractExplicitLabeledIdentity(text, ['recipient', 'penerima']);
+  const finalBuyerName = exactBuyerName || detectedName;
+  const finalRecipientName = exactRecipientName || finalBuyerName;
 
   // 5. Detect shipping / courier / address section
   const addressSection = extractSection(text, ['address', 'alamat', 'kirim ke', 'tujuan', 'lokasi']);
@@ -1572,13 +1577,14 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   }
 
   return {
-    buyerName: detectedName,
+    buyerName: finalBuyerName,
     buyerPhone: detectedPhone,
-    recipientName: detectedName,
+    payerName: exactPayerName,
+    recipientName: finalRecipientName,
     recipientPhone: detectedPhone,
     recipientAddress: detectedAddress,
     recipientCity: 'Bandung',
-    isPayerDifferentFromBuyer: false,
+    isPayerDifferentFromBuyer: !!exactPayerName && normalizedIdentity(exactPayerName) !== normalizedIdentity(finalBuyerName),
     isRecipientDifferentFromBuyer: false,
     items: matchedItems,
     paymentMethod,
@@ -1596,13 +1602,13 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
       sellerAbsorbedOngkir: 'UNSPECIFIED',
     },
     identityFactStates: {
-      buyerName: detectedName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
-      payerName: 'UNSPECIFIED',
-      recipientName: detectedName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+      buyerName: finalBuyerName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+      payerName: exactPayerName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
+      recipientName: finalRecipientName ? 'EXPLICIT_VALUE' : 'UNSPECIFIED',
     },
     confidence: 0.95,
     ambiguities,
-    explanation: `Here's what I found from your message:\n- Buyer / Reference: ${detectedName}\n- ${matchedItems.map(i => `${i.quantity}x ${i.productName} (@ Rp ${(i.suggestedUnitPrice || 0).toLocaleString('id-ID')})`).join(', ')}\n- Payment: ${paymentMethod}${paymentAmount ? ` (Rp ${paymentAmount.toLocaleString('id-ID')})` : ''}${ambiguities.length > 0 ? `\n\nI need one detail:\n- ${ambiguities.join('\n- ')}` : ''}`,
+    explanation: `Here's what I found from your message:\n- Buyer / Reference: ${finalBuyerName}\n- ${matchedItems.map(i => `${i.quantity}x ${i.productName} (@ Rp ${(i.suggestedUnitPrice || 0).toLocaleString('id-ID')})`).join(', ')}\n- Payment: ${paymentMethod}${paymentAmount ? ` (Rp ${paymentAmount.toLocaleString('id-ID')})` : ''}${ambiguities.length > 0 ? `\n\nI need one detail:\n- ${ambiguities.join('\n- ')}` : ''}`,
   };
 }
 

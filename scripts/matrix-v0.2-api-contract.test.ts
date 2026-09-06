@@ -457,6 +457,12 @@ scenario('ST-01', () => {
 scenario('ST-02', () => {
   const c = prepareTransactionCandidate({ items: 'bad', shippingEvidence: { state: 'EXPLICIT_VALUE', amount: 'bad' }, confidence: 'bad' }, INITIAL_CATALOG);
   assert.ok(c.structuredFactIssues.length > 0);
+
+  const trustedOcr = 'CUSTOMER CHAT Buyer: Rina Order: Premium 2 pcs Payer: Hendra Recipient: Ibu Siti Address: Jl. Mawar No. 10, Garut Payment: transfer Rp50.000';
+  const fallback = fallbackDeterministicParser(trustedOcr, INITIAL_CATALOG);
+  assert.deepEqual([fallback.buyerName, fallback.payerName, fallback.recipientName], ['Rina', 'Hendra', 'Ibu Siti']);
+  const serverSource = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
+  assert.match(serverSource, /fallbackDeterministicParser\(trustedSourceEvidenceText, catalog\)/);
 });
 scenario('ST-03', () => {
   const candidateData = atomicCandidate({ explanation: 'Total Rp1', shippingEvidence: { state: 'EXPLICIT_VALUE', chargeTo: 'BUYER' } });
