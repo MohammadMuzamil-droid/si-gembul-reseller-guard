@@ -5,6 +5,7 @@
 import React, { useMemo, useState } from 'react';
 import { CustomerIdentityDecision, ResellerOrder } from '../../types';
 import { CustomerProfile, RepeatOpportunityStatus, safelyDeriveCustomerIntelligence } from '../../lib/customerIntelligence';
+import { formatSignedRupiah } from '../../lib/formatters';
 import { SiGembulMascot } from '../mascot/SiGembulMascot';
 import { CalendarClock, CircleAlert, History, Sparkles, UsersRound, WalletCards } from 'lucide-react';
 
@@ -187,7 +188,7 @@ const CustomerProfileDetail: React.FC<{ profile: CustomerProfile }> = ({ profile
         <Metric label="Completed orders" value={String(profile.completedOrderCount)} />
         <Metric label="Average product value" value={`Rp ${profile.averageOrderValue.toLocaleString('id-ID')}`} />
         <Metric label="Product sales" value={`Rp ${profile.totalProductSales.toLocaleString('id-ID')}`} />
-        <Metric label="Product profit" value={`Rp ${profile.totalProductProfit.toLocaleString('id-ID')}`} />
+        <Metric label="Product profit" value={formatSignedRupiah(profile.totalProductProfit)} />
       </div>
 
       <div className="space-y-2">

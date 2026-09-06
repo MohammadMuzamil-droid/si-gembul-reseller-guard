@@ -20,6 +20,7 @@ import {
   matchItemsWithCatalog,
   generateBuyerInvoiceText 
 } from '../../lib/deterministicEngine';
+import { formatSignedRupiah } from '../../lib/formatters';
 import { SiGembulMascot, MascotPose } from '../mascot/SiGembulMascot';
 import { 
   Send, 
@@ -50,6 +51,7 @@ interface AgentChatDeskProps {
   onClearChat: () => void;
   onUpdateMessageCandidate?: (messageId: string, candidate: CandidateExtraction) => void;
   isProcessing: boolean;
+  aiQuota: { analysesRemaining: number; globalAvailability: 'AVAILABLE' | 'TEMPORARILY_UNAVAILABLE' | 'CAMPAIGN_CEILING_REACHED' } | null;
 }
 
 export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
@@ -63,6 +65,7 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
   onClearChat,
   onUpdateMessageCandidate,
   isProcessing,
+  aiQuota,
 }) => {
   const [inputText, setInputText] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -183,6 +186,17 @@ export const AgentChatDesk: React.FC<AgentChatDeskProps> = ({
             <p className="text-xs text-slate-500">
               Send free-form chat, customer notes, or payment evidence
             </p>
+            {aiQuota && (
+              <p className={`mt-1 text-[11px] font-semibold ${
+                aiQuota.globalAvailability === 'AVAILABLE' ? 'text-emerald-700' : 'text-amber-800'
+              }`}>
+                {aiQuota.globalAvailability === 'AVAILABLE'
+                  ? `AI evidence analyses remaining: ${aiQuota.analysesRemaining}`
+                  : aiQuota.globalAvailability === 'TEMPORARILY_UNAVAILABLE'
+                    ? 'Live AI evidence analysis is temporarily resting; your deterministic tools stay available.'
+                    : 'Live AI evidence analysis is unavailable for this campaign; your deterministic tools stay available.'}
+              </p>
+            )}
           </div>
         </div>
 
@@ -847,7 +861,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
         </div>
         <div className="flex justify-between text-[11px] text-slate-400 pt-0.5">
           <span>Est. Net Profit (Product Margin: {financials.profitMarginPercent}%)</span>
-          <span className="text-emerald-300 font-semibold">+Rp {financials.estimatedNetProfit.toLocaleString('id-ID')}</span>
+          <span className="text-emerald-300 font-semibold">{formatSignedRupiah(financials.estimatedNetProfit)}</span>
         </div>
       </div>
 

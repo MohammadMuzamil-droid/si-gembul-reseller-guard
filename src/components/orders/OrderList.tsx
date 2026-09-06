@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { ResellerOrder, ResellerSettings, PaymentStatus, ShippingStatus } from '../../types';
 import { OrderDetailModal } from './OrderDetailModal';
 import { SiGembulMascot } from '../mascot/SiGembulMascot';
+import { formatSignedRupiah } from '../../lib/formatters';
 import { 
   Search, 
   Filter, 
@@ -252,7 +253,7 @@ export const OrderList: React.FC<OrderListProps> = ({
                       Rp {order.financials.totalPayable.toLocaleString('id-ID')}
                     </div>
                     <div className="text-[10px] font-semibold text-emerald-600">
-                      Profit: +Rp {order.financials.estimatedNetProfit.toLocaleString('id-ID')}
+                      Profit: {formatSignedRupiah(order.financials.estimatedNetProfit)}
                     </div>
                   </div>
 

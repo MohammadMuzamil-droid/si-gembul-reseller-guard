@@ -6,6 +6,7 @@
 import React, { useState } from 'react';
 import { ResellerOrder, DailyCloseRecord, ResellerSettings } from '../../types';
 import { calculateTutupBukuMetrics } from '../../lib/deterministicEngine';
+import { formatSignedRupiah } from '../../lib/formatters';
 import { SiGembulMascot } from '../mascot/SiGembulMascot';
 import { 
   BookOpen, 
@@ -169,7 +170,7 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
           </span>
           <div className="mt-3">
             <span className="text-2xl font-extrabold text-emerald-300 font-['Outfit',sans-serif]">
-              +Rp {currentMetrics.totalNetProfit.toLocaleString('id-ID')}
+              {formatSignedRupiah(currentMetrics.totalNetProfit)}
             </span>
             <span className="block text-xs text-emerald-400/80 mt-0.5">
               Realized margin after shipping
@@ -306,7 +307,7 @@ Tutup Buku dilakukan secara deterministik oleh Si Gembul Reseller Guard.`;
                     Omset: Rp {rec.totalGrossRevenue.toLocaleString('id-ID')}
                   </span>
                   <span className="font-bold text-emerald-700">
-                    Profit: +Rp {rec.totalNetProfit.toLocaleString('id-ID')}
+                    Profit: {formatSignedRupiah(rec.totalNetProfit)}
                   </span>
                 </div>
               </div>

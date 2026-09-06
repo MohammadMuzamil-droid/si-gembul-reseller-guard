@@ -10,13 +10,25 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 import dotenv from 'dotenv';
 import { canonicalizeCandidateItems, isPartialCatalogVariantReference } from './src/lib/deterministicEngine';
+import {
+  PUBLIC_JUDGING_QUOTA,
+  publicQuotaStatus,
+  readGlobalQuotaState,
+  readUserQuotaState,
+  reservePublicJudgingQuota,
+  type PublicQuotaStatus,
+} from './src/lib/publicJudgingQuota';
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const FIRESTORE_DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || 'ai-studio-82c56719-f5b4-4b25-9fe0-200dd023069b';
+const QUOTA_CAMPAIGN_COLLECTION = '_public_judging_quota';
+const QUOTA_USER_COLLECTION = '_public_judging_quota_users';
 
 app.use(express.json({ limit: '15mb' }));
 
@@ -184,9 +196,16 @@ function isConversationalQuestion(message: string): boolean {
   return /\?|\b(what|how|which|when|where|why|berapa|berapa banyak|jumlah|kuantitas|quantity|profit|laba|margin|sales|cogs|equivalent|setara)\b/.test(normalized);
 }
 
+function getFirebaseAdminApp() {
+  return getApps()[0] || initializeApp({ credential: applicationDefault() });
+}
+
 function getFirebaseAdminAuth() {
-  const adminApp = getApps()[0] || initializeApp({ credential: applicationDefault() });
-  return getAuth(adminApp);
+  return getAuth(getFirebaseAdminApp());
+}
+
+function getQuotaFirestore() {
+  return getFirestore(getFirebaseAdminApp(), FIRESTORE_DATABASE_ID);
 }
 
 function sendSafeError(res: Response, status: number, code: string, error: string) {
@@ -197,27 +216,89 @@ export function isUidScopeAuthorized(authenticatedUid: string, requestedUid: unk
   return typeof requestedUid !== 'string' || requestedUid.length === 0 || requestedUid === authenticatedUid;
 }
 
-async function verifyFirebaseRequest(req: Request, res: Response): Promise<boolean> {
+async function verifyFirebaseRequest(req: Request, res: Response): Promise<string | null> {
   const authorization = req.get('authorization') || '';
   const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
 
   if (!token) {
     sendSafeError(res, 401, 'AUTH_REQUIRED', 'Authentication is required. Please sign in and try again.');
-    return false;
+    return null;
   }
 
   try {
     const decodedToken = await getFirebaseAdminAuth().verifyIdToken(token);
     if (!isUidScopeAuthorized(decodedToken.uid, req.body?.userId)) {
       sendSafeError(res, 403, 'UID_SCOPE_MISMATCH', 'The authenticated session cannot act for another user.');
-      return false;
+      return null;
     }
-    return true;
+    return decodedToken.uid;
   } catch {
     console.warn('Firebase ID token verification failed', { category: 'AUTH_INVALID' });
     sendSafeError(res, 401, 'AUTH_INVALID', 'Your session could not be verified. Please sign in again.');
-    return false;
+    return null;
   }
+}
+
+function quotaErrorMessage(code: NonNullable<ReturnType<typeof reservePublicJudgingQuota>['code']>): string {
+  if (code === 'AI_USER_QUOTA_EXHAUSTED') {
+    return 'Your AI evidence analysis allowance has been used. Your saved orders and deterministic tools remain available.';
+  }
+  if (code === 'AI_GLOBAL_PACING_PAUSED') {
+    return 'Live AI evidence analysis is temporarily resting to keep it available throughout judging. Your saved orders and deterministic tools remain available.';
+  }
+  return 'The live AI evidence campaign allowance has been preserved for the public/judging window. Your saved orders and deterministic tools remain available.';
+}
+
+function sendQuotaError(
+  res: Response,
+  code: NonNullable<ReturnType<typeof reservePublicJudgingQuota>['code']>,
+  quota: PublicQuotaStatus,
+) {
+  res.status(429).json({ code, error: quotaErrorMessage(code), quota });
+}
+
+async function readPublicQuotaStatus(uid: string, now = Date.now()): Promise<PublicQuotaStatus> {
+  const db = getQuotaFirestore();
+  const [campaignSnapshot, userSnapshot] = await Promise.all([
+    db.collection(QUOTA_CAMPAIGN_COLLECTION).doc(PUBLIC_JUDGING_QUOTA.campaignId).get(),
+    db.collection(QUOTA_USER_COLLECTION).doc(uid).get(),
+  ]);
+  const globalState = readGlobalQuotaState(campaignSnapshot.data(), now);
+  const userState = readUserQuotaState(userSnapshot.data());
+  return publicQuotaStatus(userState, globalState, now);
+}
+
+async function reserveLiveAiQuota(uid: string, estimatedCallUnits: number, now = Date.now()) {
+  const db = getQuotaFirestore();
+  const campaignRef = db.collection(QUOTA_CAMPAIGN_COLLECTION).doc(PUBLIC_JUDGING_QUOTA.campaignId);
+  const userRef = db.collection(QUOTA_USER_COLLECTION).doc(uid);
+
+  return db.runTransaction(async transaction => {
+    const [campaignSnapshot, userSnapshot] = await Promise.all([
+      transaction.get(campaignRef),
+      transaction.get(userRef),
+    ]);
+    const reservation = reservePublicJudgingQuota(
+      readGlobalQuotaState(campaignSnapshot.data(), now),
+      readUserQuotaState(userSnapshot.data()),
+      estimatedCallUnits,
+      now,
+    );
+
+    if (reservation.allowed) {
+      transaction.set(campaignRef, {
+        ...reservation.nextGlobalState,
+        campaignId: PUBLIC_JUDGING_QUOTA.campaignId,
+        updatedAtMs: now,
+      }, { merge: true });
+      transaction.set(userRef, {
+        ...reservation.nextUserState,
+        campaignId: PUBLIC_JUDGING_QUOTA.campaignId,
+        updatedAtMs: now,
+      }, { merge: true });
+    }
+    return reservation;
+  });
 }
 
 export function getLatestTransactionCandidate(conversationHistory: any[]): any | undefined {
@@ -1093,10 +1174,21 @@ app.get('/api/health', (req: Request, res: Response) => {
 });
 
 // Gemini Multi-turn Agent Interpret Endpoint
-app.post('/api/agent/interpret', async (req: Request, res: Response) => {
-  if (!(await verifyFirebaseRequest(req, res))) {
-    return;
+app.get('/api/agent/quota', async (req: Request, res: Response) => {
+  const uid = await verifyFirebaseRequest(req, res);
+  if (!uid) return;
+
+  try {
+    res.json({ quota: await readPublicQuotaStatus(uid) });
+  } catch {
+    console.error('AI quota status read failed', { category: 'QUOTA_STATE_UNAVAILABLE' });
+    sendSafeError(res, 503, 'QUOTA_STATE_UNAVAILABLE', 'AI evidence availability is temporarily unavailable. Your saved orders and deterministic tools remain available.');
   }
+});
+
+app.post('/api/agent/interpret', async (req: Request, res: Response) => {
+  const uid = await verifyFirebaseRequest(req, res);
+  if (!uid) return;
 
   try {
     const { 
@@ -1205,6 +1297,23 @@ Store Context:
       return;
     }
 
+    // Reserve the maximum underlying Gemini work before the first chargeable
+    // request. Image evidence uses OCR plus interpretation; text uses one
+    // structured interpretation call. The Firestore transaction prevents a
+    // parallel request from spending the same UID or global allowance twice.
+    let quotaReservation;
+    try {
+      quotaReservation = await reserveLiveAiQuota(uid, imageBase64 ? 2 : 1);
+    } catch {
+      console.error('AI quota reservation failed', { category: 'QUOTA_STATE_UNAVAILABLE' });
+      sendSafeError(res, 503, 'QUOTA_STATE_UNAVAILABLE', 'AI evidence availability is temporarily unavailable. Your saved orders and deterministic tools remain available.');
+      return;
+    }
+    if (!quotaReservation.allowed) {
+      sendQuotaError(res, quotaReservation.code!, quotaReservation.status);
+      return;
+    }
+
     // Establish a source-of-evidence boundary independent from transaction
     // interpretation. Text is already literal user evidence; images receive a
     // separate OCR-only pass with no catalog or conversation context.
@@ -1292,6 +1401,7 @@ Store Context:
       provider,
       isAIPowered: provider === 'gemini',
       rawExplanation: candidateData.explanation,
+      quota: quotaReservation.status,
     });
   } catch {
     console.error('Gemini interpretation failed', { provider: 'gemini', category: 'AI_UNAVAILABLE' });

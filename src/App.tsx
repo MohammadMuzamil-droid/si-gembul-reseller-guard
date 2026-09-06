@@ -54,6 +54,11 @@ import {
   AlertCircle
 } from 'lucide-react';
 
+type AiQuotaStatus = {
+  analysesRemaining: number;
+  globalAvailability: 'AVAILABLE' | 'TEMPORARILY_UNAVAILABLE' | 'CAMPAIGN_CEILING_REACHED';
+};
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -68,6 +73,7 @@ export default function App() {
   const [dailyCloses, setDailyCloses] = useState<DailyCloseRecord[]>([]);
   const [chatHistory, setChatHistory] = useState<AgentChatMessage[]>([]);
   const [isAgentProcessing, setIsAgentProcessing] = useState(false);
+  const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
 
   // Listen to Firebase Auth state
@@ -121,6 +127,28 @@ export default function App() {
     return () => {
       isMounted = false;
     };
+  }, [currentUser?.uid]);
+
+  useEffect(() => {
+    let active = true;
+    if (!currentUser) {
+      setAiQuota(null);
+      return () => { active = false; };
+    }
+
+    const loadAiQuota = async () => {
+      try {
+        const idToken = await auth.currentUser?.getIdToken();
+        if (!idToken) return;
+        const response = await fetch('/api/agent/quota', { headers: { Authorization: `Bearer ${idToken}` } });
+        const data = await response.json().catch(() => ({}));
+        if (active && response.ok && data.quota) setAiQuota(data.quota);
+      } catch {
+        // The indicator is optional; deterministic functionality remains independent.
+      }
+    };
+    void loadAiQuota();
+    return () => { active = false; };
   }, [currentUser?.uid]);
 
   // Show Toast notification
@@ -215,6 +243,7 @@ export default function App() {
           try {
             const errorBody = JSON.parse(rawText);
             errorCode = typeof errorBody.code === 'string' ? errorBody.code : errorCode;
+            if (errorBody.quota) setAiQuota(errorBody.quota);
           } catch {
             errorCode = 'TEMPORARY_SERVICE_ISSUE';
           }
@@ -236,6 +265,7 @@ export default function App() {
       }
 
       requestStage = 'processing_candidate_success';
+      if (data.quota) setAiQuota(data.quota);
       const assistantMsg: AgentChatMessage = {
         id: `msg_asst_${Date.now()}`,
         role: 'assistant',
@@ -266,6 +296,10 @@ export default function App() {
         AUTH_INVALID: 'Your secure session could not be verified. Please sign in again.',
         AI_UNAVAILABLE: 'Temporary AI service issue. Nothing was saved. Please try again.',
         AI_RESPONSE_INVALID: 'Temporary AI service issue. Nothing was saved. Please try again.',
+        AI_USER_QUOTA_EXHAUSTED: 'You have used your six AI evidence analyses for this account. Your saved orders and deterministic tools remain available.',
+        AI_GLOBAL_PACING_PAUSED: 'Live AI evidence analysis is temporarily resting to stay available throughout judging. Your saved orders and deterministic tools remain available.',
+        AI_CAMPAIGN_CEILING_REACHED: 'The live AI evidence allowance has been preserved for the campaign window. Your saved orders and deterministic tools remain available.',
+        QUOTA_STATE_UNAVAILABLE: 'AI evidence availability is temporarily unavailable. Your saved orders and deterministic tools remain available.',
         INTERNAL_ERROR: 'Temporary service issue. Nothing was saved. Please try again.',
         TEMPORARY_SERVICE_ISSUE: 'Temporary service issue. Nothing was saved. Please try again.',
       };
@@ -577,6 +611,7 @@ export default function App() {
               onClearChat={handleClearChat}
               onUpdateMessageCandidate={handleUpdateMessageCandidate}
               isProcessing={isAgentProcessing}
+              aiQuota={aiQuota}
             />
           </div>
         )}
