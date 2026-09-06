@@ -29,15 +29,15 @@ async function deleteAccount(user: TestUser | undefined): Promise<void> {
   });
 }
 
-function docUrl(userId: string, docId: string): string {
-  return `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/${config.firestoreDatabaseId}/documents/users/${userId}/audit_logs/${docId}`;
+function docUrl(userId: string, docId: string, collection = 'audit_logs'): string {
+  return `https://firestore.googleapis.com/v1/projects/${config.projectId}/databases/${config.firestoreDatabaseId}/documents/users/${userId}/${collection}/${docId}`;
 }
 
-async function firestore(user: TestUser, method: 'GET' | 'PATCH' | 'DELETE', targetUid: string, docId: string): Promise<Response> {
+async function firestore(user: TestUser, method: 'GET' | 'PATCH' | 'DELETE', targetUid: string, docId: string, collection = 'audit_logs'): Promise<Response> {
   if (method === 'GET') resources.firestoreReads += 1;
   if (method === 'PATCH') resources.firestoreWrites += 1;
   if (method === 'DELETE') resources.firestoreDeletes += 1;
-  return fetch(docUrl(targetUid, docId), {
+  return fetch(docUrl(targetUid, docId, collection), {
     method,
     headers: { authorization: `Bearer ${user.idToken}`, 'content-type': 'application/json' },
     ...(method === 'PATCH' ? { body: JSON.stringify({ fields: { campaign: { stringValue: 'matrix-v0.2' }, ownerUid: { stringValue: targetUid } } }) } : {}),
@@ -76,6 +76,10 @@ try {
   const crossWriteB = await firestore(userB, 'PATCH', userA.localId, `${docB}-cross`);
   record('SE-03', () => assert.deepEqual([crossWriteA.status, crossWriteB.status], [403, 403]));
 
+  const ownArchive = await firestore(userA, 'PATCH', userA.localId, `${docA}-archive`, 'evidence_archives');
+  const crossArchive = await firestore(userB, 'PATCH', userA.localId, `${docA}-archive-cross`, 'evidence_archives');
+  record('OR-10-firestore', () => assert.deepEqual([ownArchive.status, crossArchive.status], [200, 403]));
+
   const unauth = await fetch(`${baseUrl}/api/agent/interpret`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -98,6 +102,7 @@ try {
   });
 } finally {
   if (userA) await firestore(userA, 'DELETE', userA.localId, docA).catch(() => undefined);
+  if (userA) await firestore(userA, 'DELETE', userA.localId, `${docA}-archive`, 'evidence_archives').catch(() => undefined);
   if (userB) await firestore(userB, 'DELETE', userB.localId, docB).catch(() => undefined);
   await deleteAccount(userA);
   await deleteAccount(userB);

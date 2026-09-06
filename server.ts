@@ -604,12 +604,20 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
     if (!ambiguities.includes(issue)) ambiguities.push(issue);
   };
 
-  candidate.items = groundCandidateItemsInSource(
-    Array.isArray(candidate.items) ? candidate.items : [],
+  const modelItems = Array.isArray(candidate.items) ? candidate.items : [];
+  const sourceGroundedItems = reconcileExplicitCatalogItemsFromSource(
+    modelItems,
     candidate.sourceEvidenceText,
     catalog,
-    ambiguities,
   );
+  candidate.items = sourceGroundedItems !== modelItems
+    ? sourceGroundedItems
+    : groundCandidateItemsInSource(
+        modelItems,
+        candidate.sourceEvidenceText,
+        catalog,
+        ambiguities,
+      );
 
   normalizeAtomicPaymentEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
@@ -691,6 +699,28 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   }
   candidate.ambiguities = ambiguities;
   return candidate;
+}
+
+/**
+ * Explicit multi-item order syntax is deterministic evidence. If the model
+ * collapses those clauses into a different item shape, prefer the catalog
+ * lines parsed from the literal Order section before financial calculation.
+ */
+function reconcileExplicitCatalogItemsFromSource(items: any[], sourceEvidenceText: unknown, catalog: any[]): any[] {
+  if (typeof sourceEvidenceText !== 'string' || !catalog.length) return items;
+  const orderSection = sourceEvidenceText.match(
+    /(?:order|pesanan|item|barang|produk|product)\s*[:=]\s*([\s\S]*?)(?=\b(?:payment|pembayaran|bayar|transfer|tf|total|address|alamat|kirim ke|tujuan|lokasi|courier|kurir|ekspedisi|ongkir|shipping)\s*[:=]|$)/i,
+  )?.[1];
+  if (!orderSection || !/[+,;\n]/.test(orderSection)) return items;
+
+  const deterministicItems = canonicalizeCandidateItems(
+    fallbackDeterministicParser(sourceEvidenceText, catalog).items || [],
+    catalog,
+  );
+  const hasCompleteCatalogResolution = deterministicItems.length >= 2 && deterministicItems.every(item =>
+    item.resolutionState === 'RESOLVED' && !!item.matchedSku && item.matchedSku !== 'CUSTOM'
+  );
+  return hasCompleteCatalogResolution ? deterministicItems : items;
 }
 
 function evidenceWords(value: unknown): string[] {
@@ -1324,8 +1354,8 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   };
 
   if (orderSection) {
-    // Break order section by newlines or commas
-    const itemChunks = orderSection.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+    // Break an explicit order section by common list separators, including "+".
+    const itemChunks = orderSection.split(/[\n,;+]+/).map(s => s.trim()).filter(Boolean);
     for (const chunk of itemChunks) {
       const parseChunk = chunk.replace(/[.!?]+$/, '').trim();
       const itemMatch1 = parseChunk.match(/^(\d+)\s*(?:x|pcs|bks|bungkus|pack|box|cup|botol|can)?\s*(.+?)(?:\s*(?:@|harga|sebesar|rp)?\s*(?:rp\.?\s*)?([\d\.,]+))?$/i);

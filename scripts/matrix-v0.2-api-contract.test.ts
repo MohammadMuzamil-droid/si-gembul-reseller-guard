@@ -261,6 +261,34 @@ scenario('PR-13', () => {
   const c = fallbackDeterministicParser('Customer: Siti Order: Medium 4 kg Payment: transfer Rp240.000', INITIAL_CATALOG);
   const items = matchItemsWithCatalog(c.items, INITIAL_CATALOG, 20);
   assert.deepEqual([c.items[0].quantity, c.items[0].matchedSku, items[0].quantity], [4, 'COFFEE-MED-1KG', 4]);
+
+  const sourceEvidenceText = 'Customer: Matrix Weight. Order: Medium 4 kg + Premium 4 pcs. Payment: transfer. Delivery: pickup.';
+  const fallbackMixed = fallbackDeterministicParser(sourceEvidenceText, INITIAL_CATALOG);
+  assert.deepEqual(
+    fallbackMixed.items.map((item: any) => [item.matchedSku, item.quantity]),
+    [['COFFEE-MED-1KG', 4], ['COFFEE-PREM-250', 4]],
+  );
+
+  const reconciled = prepared({
+    sourceEvidenceText,
+    items: [{ matchedSku: 'COFFEE-PREM-1KG', rawText: '4 kg Premium 4', productName: 'Premium coffee (1kg)', quantity: 4 }],
+  });
+  const order = orderFrom(reconciled);
+  assert.deepEqual(
+    reconciled.items.map((item: any) => [item.matchedSku, item.quantity]),
+    [['COFFEE-MED-1KG', 4], ['COFFEE-PREM-250', 4]],
+  );
+  assert.deepEqual(
+    [
+      order.items.reduce((sum, item) => sum + item.quantity * (INITIAL_CATALOG.find(product => product.sku === item.sku)?.pieceEquivalent || 1), 0),
+      order.items.map(item => item.unitPrice),
+      order.financials.subtotal,
+      order.financials.totalCOGS,
+      order.financials.estimatedNetProfit,
+      order.financials.profitMarginPercent,
+    ],
+    [20, [52000, 23000], 300000, 240000, 60000, 20],
+  );
 });
 scenario('PR-14', () => {
   const items = matchItemsWithCatalog([{ matchedSku: 'COFFEE-PREM-250', rawText: 'Premium 2 pcs @ Rp1', productName: 'Premium', quantity: 2, suggestedUnitPrice: 1 }], INITIAL_CATALOG, 20);
