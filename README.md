@@ -32,6 +32,8 @@ Gemini helps interpret chat and uploaded evidence. Deterministic code owns money
 - Shipment eligibility, Direct COD physical-cash confirmation, Buyer Invoice, and Admin Order Card.
 - Cancellation exclusion, roll-forward of unfinished work, and state-based **Tutup Buku** reconciliation.
 - Read-only Customer Insights derived from the reseller's own eligible order history.
+- Ambiguous product evidence such as `Arabica 2 bungkus` remains unresolved instead of being silently mapped to a catalog item.
+- Possible duplicate customer identities require an explicit **Same customer / Different customer** human decision before histories are merged.
 
 ## Original enhancement: Customer Intelligence
 
@@ -44,7 +46,7 @@ Customer Intelligence is a reseller-specific repeat-order aid, not a generic cha
 - Product quantities, order references, stored sales, and stored product-profit contribution remain traceable to the underlying orders.
 - Si Gembul never contacts a customer automatically.
 
-Example accepted synthetic demo: Siti has three eligible purchases with 28- and 28-day gaps. Twenty-four days after the latest purchase, the UI transparently labels the result **Approaching** rather than claiming a prediction.
+Accepted synthetic Golden Demo state: after an explicit **Same customer** decision, Siti has **4 eligible completed purchases** on **09 Jul, 06 Aug, 03 Sep, and 05 Sep 2026**. The observed gaps are **28 / 28 / 2 days**, the median remains **28 days**, and the deterministic status is **Early**. The identity decision is recorded without changing transaction, payment, shipping, or financial truth.
 
 ## Google component architecture
 
@@ -65,7 +67,7 @@ Authenticated browser
 | Secret Manager | Supplies `GEMINI_API_KEY` to Cloud Run through a runtime secret binding. The key is not hardcoded in application source and remains server-side. |
 | Cloud Run | Hosts the Vite/React production build and Express API, uses the platform `PORT`, and runs with the dedicated runtime service identity. |
 
-The deployed runtime service identity has `roles/secretmanager.secretAccessor` on the intended secret. No secret value belongs in this repository, README, screenshots, or social content.
+The deployed runtime service identity has the minimum permissions required by the current server design, including access to the intended secret and server-side transactional campaign-accounting state. No secret value belongs in this repository, README, screenshots, or social content.
 
 ## Security model
 
@@ -73,7 +75,8 @@ The deployed runtime service identity has `roles/secretmanager.secretAccessor` o
 - Firestore rules deny by default and permit access only where `request.auth.uid == userId` beneath `/users/{userId}/...`.
 - The server reads Gemini credentials only from `process.env.GEMINI_API_KEY`; Cloud Run injects that environment variable from Secret Manager.
 - AI output is a candidate, not an authorization decision. Missing product/payment/buyer details and unsafe financial states require resolution or explicit human confirmation.
-- Customer Intelligence is an in-memory, read-only derivation scoped to the authenticated user's loaded orders; it introduces no cross-user aggregation or profile datastore.
+- Customer Intelligence is scoped to the authenticated user's eligible order history and introduces no cross-user customer aggregation.
+- Campaign-level Gemini accounting is server-controlled and not client-writable.
 
 ## Four quality pillars
 
@@ -90,7 +93,7 @@ Post-Matrix public/judging readiness was subsequently verified without changing 
 
 The latest budget-protection policy intentionally uses a **hard campaign budget fuse only**: the earlier per-UID six-analysis limit, daily refill, and carry-over/burst pacing were removed so a legitimate evaluator is not interrupted by an arbitrary user quota. The campaign hard ceiling remains **220 Gemini call units through 30 September 2026, 23:59:59 WIB**. Requests rejected by the hard ceiling do not invoke Gemini, while deterministic workspace functions remain available.
 
-The final production-readiness regression included focused quota/formatter tests, TypeScript and production builds, production admission/security checks, deterministic invoice verification, Golden Demo/core transaction checks, and the previously validated Matrix baseline. The latest implementation also uses signed Rupiah formatting so positive, zero, and negative profit values render unambiguously.
+The final production-readiness regression included focused quota/formatter tests, TypeScript and production builds, production admission/security checks, deterministic invoice verification, Golden Demo/core transaction checks, and the previously validated Matrix baseline. Signed Rupiah formatting now renders positive, zero, and negative profit values unambiguously, for example `+Rp50.001`, `Rp0`, and `-Rp50.001`.
 
 Current repository baseline after the budget-fuse simplification:
 
@@ -132,7 +135,7 @@ gcloud run deploy SERVICE_NAME --source . --region REGION \
   --update-labels dev-tutorial=cloud-run-ai-challenge
 ```
 
-The runtime service account needs `roles/secretmanager.secretAccessor` on `SECRET_NAME`. Replace all placeholders with your own approved project resources. Do not put a Gemini key in source code, command history shared as evidence, or a public issue.
+The runtime service account needs only the permissions required by the deployed design. Replace all placeholders with your own approved project resources. Do not put a Gemini key in source code, command history shared as evidence, or a public issue.
 
 ## Golden demo path
 
@@ -140,14 +143,19 @@ Use only synthetic data in a disposable demo workspace:
 
 1. Sign in and show the Cloud Run-hosted Agent Desk.
 2. Submit a synthetic chat/evidence order; show Gemini interpretation becoming a structured candidate.
-3. Show deterministic prices, COGS, profit, payment verification state, and a meaningful guard such as Direct COD physical-cash confirmation or an unresolved-product confirmation block.
-4. Confirm one safe synthetic transaction and show its Active Order/Invoice state.
-5. Open Customer Insights and explain the causal chain: eligible historical orders -> median interval -> transparent repeat-order opportunity. The accepted Siti fixture shows 28- and 28-day intervals and an Approaching status.
+3. Show deterministic prices, COGS, profit, payment verification state, and a meaningful guard such as an unresolved-product confirmation block.
+4. Demonstrate a valid transaction path with payment/shipping evidence and the resulting Active Order/Invoice state.
+5. Show that buyer, payer, and recipient can differ without corrupting transaction identity.
+6. Demonstrate **Same customer / Different customer** confirmation when customer identity is ambiguous.
+7. Open Customer Insights and explain the causal chain: eligible historical orders -> median interval -> transparent repeat-order opportunity. The accepted Siti fixture uses four eligible purchases with **28 / 28 / 2-day** gaps, median **28 days**, and status **Early**.
+8. Show that invoice, financial results, and **Tutup Buku** remain grounded in persisted transaction truth rather than AI guesses about money.
 
 ## Known limitations and roadmap
 
 The project intentionally does not claim automated customer outreach or guaranteed purchase prediction. Future ideas such as Coach, natural-language Smart Rules, AI onboarding, Issue Management, Drive Backup, and Testimonial Privacy are not implemented features.
 
+The Vite production build still reports a non-blocking main-bundle-size warning above 500 kB. It remains documented as a residual rather than being hidden or treated as a product failure.
+
 ## Verification record
 
-The repository includes [Phase 3B soft-close evidence](evidence/Si_Gembul_Phase3B_Soft_Close_2026-09-03.md), including the deployed application checkpoint and Customer Intelligence acceptance evidence. The README baseline above records the later Matrix v0.2 and post-Matrix public/judging-readiness checkpoints through 6 September 2026.
+The repository includes [Phase 3B soft-close evidence](evidence/Si_Gembul_Phase3B_Soft_Close_2026-09-03.md), including the deployed application checkpoint and Customer Intelligence acceptance evidence. The README baseline above records the later Matrix v0.2, Golden Demo identity update, signed-currency polish, and post-Matrix public/judging-readiness checkpoints through 6 September 2026.
