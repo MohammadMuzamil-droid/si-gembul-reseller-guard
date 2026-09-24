@@ -264,6 +264,74 @@ assert.equal(laterShippingEvidencePreservesPayment.candidate?.items?.[0]?.quanti
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.buyerOngkir, 18000);
 assert.equal(laterShippingEvidencePreservesPayment.candidate?.claimedPaymentAmount, 68000);
 
+// GD-01 Real-Shape Mandatory Regression Test:
+// Shipping evidence with literal OCR text (Package: Coffee · 2 pcs · 0.5 kg) must NOT
+// demote or overwrite the previously validated canonical product (Premium coffee 250g x 2).
+const realShapeShippingEvidence = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  sourceEvidenceText: 'NusaParcel Penerima: Rina Wulandari Package: Coffee · 2 pcs · 0.5 kg Resi: NPX-DEMO-260903-18427',
+  items: [{ productName: 'Coffee · 2 pcs · 0.5 kg', rawText: 'Coffee · 2 pcs · 0.5 kg', quantity: 2 }],
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'EXPLICIT_VALUE', courierName: 'NusaParcel', trackingNumber: 'NPX-DEMO-260903-18427' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping receipt processed with real OCR evidence.',
+}, nusaPayPayerEnrichment.candidate, 'Shipping receipt evidence', true, INITIAL_CATALOG);
+
+const realShapeCandidate = realShapeShippingEvidence.candidate;
+assert.ok(realShapeCandidate, 'Candidate must be defined');
+assert.equal(realShapeCandidate.items?.length, 1);
+const canonicalItem = realShapeCandidate.items[0];
+
+// 1. Canonical product remains resolved
+assert.equal(canonicalItem.resolutionState, 'RESOLVED');
+// 2. Quantity remains 2
+assert.equal(canonicalItem.quantity, 2);
+// 3. SKU remains expected Premium 250g SKU
+assert.equal(canonicalItem.matchedSku, 'COFFEE-PREM-250');
+// 4-7. Financials match expected values
+const realShapeOrder = buildOrderFromCandidate(realShapeCandidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'user-a', 'SGB-GD01-REAL');
+assert.equal(realShapeOrder.financials.subtotal, 50000);
+assert.equal(realShapeOrder.financials.totalCOGS, 40000);
+assert.equal(realShapeOrder.financials.estimatedGrossProfit, 10000);
+assert.equal(realShapeOrder.financials.profitMarginPercent, 20);
+// 8. Shipping is Rp18,000
+assert.equal(realShapeCandidate.buyerOngkir, 18000);
+assert.equal(realShapeOrder.financials.buyerOngkir, 18000);
+// 9. Total payable is Rp68,000
+assert.equal(realShapeOrder.financials.totalPayable, 68000);
+// 10. Tracking preserved/attached
+assert.equal(realShapeCandidate.courierName, 'NusaParcel');
+assert.equal(realShapeCandidate.trackingNumber, 'NPX-DEMO-260903-18427');
+// 11. Item not replaced by "Coffee 2 pcs 0"
+assert.notEqual(canonicalItem.productName, 'Coffee 2 pcs 0');
+assert.notEqual(canonicalItem.rawText, 'Coffee 2 pcs 0');
+// 12. Item not demoted to UNRESOLVED
+assert.notEqual(canonicalItem.resolutionState, 'UNRESOLVED');
+// 13. No duplicate product line created
+assert.equal(realShapeCandidate.items.length, 1);
+assert.equal(realShapeOrder.items.length, 1);
+
+// A preserved item remains replaceable when later evidence explicitly corrects the product.
+const explicitProductCorrectionAfterPreservation = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  sourceEvidenceText: 'Koreksi produk: Medium 2 pcs',
+  items: [{ productName: 'Medium coffee', rawText: 'Medium 2 pcs', matchedSku: 'COFFEE-MED-250', quantity: 2 }],
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'UNSPECIFIED' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'UNSPECIFIED' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Explicit product correction processed.',
+}, realShapeCandidate, 'Koreksi produk: Medium 2 pcs', false, INITIAL_CATALOG);
+assert.equal(explicitProductCorrectionAfterPreservation.candidate?.items?.length, 1);
+assert.equal(explicitProductCorrectionAfterPreservation.candidate?.items?.[0]?.matchedSku, 'COFFEE-MED-250');
+assert.equal(explicitProductCorrectionAfterPreservation.candidate?.items?.[0]?.quantity, 2);
+assert.equal(explicitProductCorrectionAfterPreservation.candidate?.items?.[0]?.isPreservedContext, undefined);
+
 const explicitUnresolvedProductChangeIsNotHidden = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
   items: [{ productName: 'Arabica', rawText: 'Arabica 2 bungkus', quantity: 2 }],

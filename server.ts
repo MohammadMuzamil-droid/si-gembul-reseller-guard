@@ -895,6 +895,7 @@ function groundCandidateItemsInSource(items: any[], sourceEvidenceText: unknown,
   return items.map(item => {
     const canonical = canonicalizeCandidateItems([item], catalog)[0];
     if (!canonical || canonical.resolutionState !== 'RESOLVED') return item;
+    if (item?.isPreservedContext) return item;
     const supportedByDistinctiveToken = distinctiveCatalogTokens(canonical, catalog)
       .some(token => sourceWords.has(token));
     if (supportedByDistinctiveToken || explicitUnitSupportsCatalogResolution(canonical, sourceEvidenceText, catalog)) return item;
@@ -1061,14 +1062,14 @@ export function retainOmittedTransactionContext(updatedCandidate: any, previousC
     mergedCandidate.identityFactStates = { ...(mergedCandidate.identityFactStates || {}), payerName: 'UNSPECIFIED' };
   }
   if ((!Array.isArray(mergedCandidate.items) || mergedCandidate.items.length === 0 || isFallbackPlaceholderItemSet(mergedCandidate.items)) && Array.isArray(previousCandidate.items)) {
-    mergedCandidate.items = previousCandidate.items;
+    mergedCandidate.items = previousCandidate.items.map(item => ({ ...item, isPreservedContext: true }));
   } else if (
     Array.isArray(mergedCandidate.items) &&
     Array.isArray(previousCandidate.items) &&
     hasExplicitSupplementaryEvidence(updatedCandidate) &&
     shouldPreservePreviousResolvedItems(mergedCandidate.items, previousCandidate.items, catalog)
   ) {
-    mergedCandidate.items = previousCandidate.items;
+    mergedCandidate.items = previousCandidate.items.map(item => ({ ...item, isPreservedContext: true }));
   } else if (Array.isArray(mergedCandidate.items) && Array.isArray(previousCandidate.items)) {
     mergedCandidate.items = retainOmittedItemQuantity(mergedCandidate.items, previousCandidate.items);
   }
