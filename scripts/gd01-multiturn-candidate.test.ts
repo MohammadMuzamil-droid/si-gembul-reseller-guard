@@ -145,6 +145,44 @@ assert.equal(gd01CustomerContractResponse.candidate?.recipientName, 'Rina Wuland
 assert.equal(gd01CustomerContractResponse.candidate?.structuredFactIssues?.length, 0);
 assert.deepEqual(gd01CustomerContractResponse.candidate?.shippingEvidence, { state: 'UNSPECIFIED' });
 
+// GD-01 Stage-1 Real-Shape Mandatory Regression Test:
+// When customer chat expresses product ("premium yang 250gr") and quantity ("Pesan 2 bungkus ya")
+// across separate sentences in source evidence, the item must remain RESOLVED with quantity 2
+// without falsely triggering an unresolved quantity ambiguity blocker.
+const realShapeCustomerChat = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  sourceEvidenceText: 'Mas, premium yang 250gr masih ada?\nPesan 2 bungkus ya. Tolong kirim ke adik saya Rina di Kediri.\nAlamatnya Jl. Melati No. 18, Kota Kediri. Nanti yang transfer suami saya Ahmad.\nAda mbak\nSiap mbak, saya proses.',
+  buyerName: 'Siti Rahmawati',
+  payerName: 'Ahmad',
+  recipientName: 'Rina',
+  recipientAddress: 'Jl. Melati No. 18, Kota Kediri',
+  recipientCity: 'Kediri',
+  paymentMethod: 'TRANSFER',
+  isPayerDifferentFromBuyer: true,
+  items: [{ rawText: 'premium yang 250gr', productName: 'Premium coffee (250g)', quantity: 2, matchedSku: 'COFFEE-PREM-250' }],
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  identityFactStates: { buyerName: 'EXPLICIT_VALUE', payerName: 'EXPLICIT_VALUE', recipientName: 'EXPLICIT_VALUE' },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Customer chat parsed.',
+}, undefined, '', true, INITIAL_CATALOG);
+
+const stage1Candidate = realShapeCustomerChat.candidate;
+assert.ok(stage1Candidate, 'Stage-1 candidate must be defined');
+assert.equal(stage1Candidate.items?.length, 1);
+const stage1Item = stage1Candidate.items[0];
+assert.equal(stage1Item.matchedSku, 'COFFEE-PREM-250');
+assert.equal(stage1Item.quantity, 2);
+assert.equal(stage1Item.resolutionState, 'RESOLVED');
+assert.ok(!stage1Candidate.ambiguities.some((a: string) => /quantity/i.test(a)), 'Quantity must not be flagged as unresolved');
+assert.ok(getCandidateConfirmationBlockers(stage1Candidate, matchItemsWithCatalog(stage1Candidate.items, INITIAL_CATALOG, 20)).length === 0, 'Stage-1 confirmation must be unblocked');
+const stage1Order = buildOrderFromCandidate(stage1Candidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'user-a', 'SGB-GD01-STAGE1');
+assert.equal(stage1Order.financials.subtotal, 50000);
+assert.equal(stage1Order.financials.totalCOGS, 40000);
+assert.equal(stage1Order.financials.estimatedGrossProfit, 10000);
+assert.equal(stage1Order.financials.profitMarginPercent, 20);
+assert.equal(stage1Order.financials.totalPayable, 50000);
+
 const gd01AdminContractResponse = resolveCandidateResponse({
   responseMode: 'TRANSACTION',
   items: priorCandidate.items,

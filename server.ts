@@ -756,9 +756,13 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   candidate.structuredFactIssues = structuredFactIssues;
   candidate.items = canonicalizeCandidateItems(Array.isArray(candidate.items) ? candidate.items : [], catalog);
   for (const item of candidate.items) {
+    if (item.isPreservedContext) continue;
     const itemEvidence = `${item.rawText || ''} ${item.productName || ''}`;
     const hasExplicitQuantity = /(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|kg|botol|pouch|unit)\b/i.test(itemEvidence) ||
-      /^\s*\d+(?:[.,]\d+)?\s+/i.test(itemEvidence);
+      /^\s*\d+(?:[.,]\d+)?\s+/i.test(itemEvidence) ||
+      (Array.isArray(candidate.items) && candidate.items.length === 1 && typeof candidate.sourceEvidenceText === 'string' &&
+        (/(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|kg|botol|pouch|unit)\b/i.test(candidate.sourceEvidenceText) ||
+         /(?:pesan|order|beli|ambil|minta|kirim)\s+\d+\b/i.test(candidate.sourceEvidenceText)));
     if (!hasExplicitQuantity) {
       const issue = `Quantity is unresolved for "${item.rawText || item.productName}".`;
       if (!ambiguities.includes(issue)) ambiguities.push(issue);
