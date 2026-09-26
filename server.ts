@@ -1115,6 +1115,22 @@ export function resolveCandidateResponse(
     ? retainOmittedTransactionContext(candidateData, latestCandidate, message || '', catalog)
     : candidateData;
   const preparedCandidate = prepareTransactionCandidate(contextMergedCandidate, catalog);
+  const previousItem = latestCandidate?.items?.length === 1 ? latestCandidate.items[0] : undefined;
+  const incomingItem = candidateData?.items?.length === 1 ? candidateData.items[0] : undefined;
+  const resolvedItem = preparedCandidate.items?.length === 1 ? preparedCandidate.items[0] : undefined;
+  const previousQuantityEvidence = `${previousItem?.rawText || ''} ${latestCandidate?.sourceEvidenceText || ''}`;
+  const previousQuantityWasExplicit = /(?:^|\s)\d+(?:[.,]\d+)?\s*(?:x|pcs?|bks|bungkus|pack|box|kg|botol|pouch|unit)\b/i.test(previousQuantityEvidence) ||
+    /(?:pesan|order|beli|ambil|minta|kirim)\s+\d+\b/i.test(previousQuantityEvidence);
+  const previousVariantWasUnresolved = previousItem &&
+    canonicalizeCandidateItems([previousItem], catalog)[0]?.resolutionState === 'UNRESOLVED';
+  // A variant-only clarification can inherit a previously evidenced quantity.
+  // Remove only the parser's matching stale quantity issue; all other blockers survive.
+  if (previousVariantWasUnresolved && previousQuantityWasExplicit && incomingItem && resolvedItem?.resolutionState === 'RESOLVED' &&
+      !candidateHasExplicitQuantity(incomingItem) && !/\b(?:quantity|jumlah(?:nya)?|kuantitas|berapa)\b/i.test(message || '') &&
+      Number(resolvedItem.quantity) === Number(previousItem.quantity)) {
+    const staleIssue = `Quantity is unresolved for "${resolvedItem.rawText || resolvedItem.productName}".`;
+    preparedCandidate.ambiguities = (preparedCandidate.ambiguities || []).filter((issue: string) => issue !== staleIssue);
+  }
   const usesAuthoritativeFacts = isConversationalQuestion(message || '') && !!latestCandidate;
   const isEvidenceUpdate = !!latestCandidate && (hasImageEvidence || hasTransactionEvidenceFacts(preparedCandidate));
   const isConversation = !isEvidenceUpdate && (preparedCandidate.responseMode === 'CONVERSATION' || usesAuthoritativeFacts);
