@@ -352,6 +352,40 @@ assert.notEqual(canonicalItem.resolutionState, 'UNRESOLVED');
 assert.equal(realShapeCandidate.items.length, 1);
 assert.equal(realShapeOrder.items.length, 1);
 
+// GD-01 Spurious Date Header Overwrite Regression Test:
+// When shipping receipt OCR text contains date headers like "03 Sep 2026",
+// extraction might extract "Sep" x 3 as a custom item.
+// State merge must NOT allow this uncataloged item from shipping evidence to overwrite
+// the previously validated canonical product (Premium coffee 250g x 2).
+const spuriousDateHeaderShippingEvidence = resolveCandidateResponse({
+  responseMode: 'TRANSACTION',
+  sourceEvidenceText: 'SYNTHETIC DEMO SHIPPING LABEL\nNusa Parcel\nREG\n03 Sep 2026 11:08 WIB\nRECIPIENT\nRina Wulandari\nDESTINATION\nJI. Melati No. 18, Kota Kediri, Jawa Timur\nPACKAGE\nCoffee 2 pcs. 0.5 kg\nSERVICE\nREG\nTRACKING\nNPX-DEMO-260903-18427',
+  items: [{ productName: 'Sep', rawText: '03 Sep', quantity: 3, matchedSku: 'CUSTOM' }],
+  paymentEvidence: { state: 'UNSPECIFIED' },
+  shippingEvidence: { state: 'UNSPECIFIED' },
+  deliveryEvidence: { state: 'UNSPECIFIED', courierName: 'NusaParcel', trackingNumber: 'NPX-DEMO-260903-18427' },
+  identityFactStates: { buyerName: 'UNSPECIFIED', payerName: 'UNSPECIFIED', recipientName: 'EXPLICIT_VALUE' },
+  recipientName: 'Rina Wulandari',
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: 'Shipping receipt processed.',
+}, nusaPayPayerEnrichment.candidate, 'Uploaded payment/order evidence image', true, INITIAL_CATALOG);
+
+const spuriousCandidate = spuriousDateHeaderShippingEvidence.candidate;
+assert.ok(spuriousCandidate, 'Spurious candidate must be defined');
+assert.equal(spuriousCandidate.items?.length, 1);
+assert.equal(spuriousCandidate.items[0].matchedSku, 'COFFEE-PREM-250');
+assert.equal(spuriousCandidate.items[0].quantity, 2);
+assert.equal(spuriousCandidate.items[0].resolutionState, 'RESOLVED');
+assert.notEqual(spuriousCandidate.items[0].productName, 'Sep');
+assert.equal(spuriousCandidate.buyerOngkir, 18000);
+const spuriousOrder = buildOrderFromCandidate(spuriousCandidate, INITIAL_CATALOG, DEFAULT_SETTINGS, 'user-a', 'SGB-GD01-SPURIOUS');
+assert.equal(spuriousOrder.financials.subtotal, 50000);
+assert.equal(spuriousOrder.financials.totalCOGS, 40000);
+assert.equal(spuriousOrder.financials.estimatedGrossProfit, 10000);
+assert.equal(spuriousOrder.financials.totalPayable, 68000);
+assert.equal(spuriousOrder.financials.profitMarginPercent, 20);
+
 // A preserved item remains replaceable when later evidence explicitly corrects the product.
 const explicitProductCorrectionAfterPreservation = resolveCandidateResponse({
   responseMode: 'TRANSACTION',

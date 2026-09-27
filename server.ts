@@ -530,7 +530,7 @@ function normalizeAtomicDeliveryEvidence(
     return;
   }
 
-  const state = normalizeIdentityFactState(raw.state);
+  const state = normalizeIdentityFactState(raw.state) || (typeof raw.courierName === 'string' && raw.courierName.trim() && typeof raw.trackingNumber === 'string' && raw.trackingNumber.trim() ? 'EXPLICIT_VALUE' : undefined);
   const courierName = typeof raw.courierName === 'string' ? raw.courierName.trim() : '';
   const trackingNumber = typeof raw.trackingNumber === 'string' ? raw.trackingNumber.trim() : '';
   if (!state) {
@@ -1014,11 +1014,22 @@ function shouldPreservePreviousResolvedItems(updatedItems: any[], previousItems:
 }
 
 function hasExplicitSupplementaryEvidence(candidate: any): boolean {
+  if (!candidate || typeof candidate !== 'object') return false;
   return candidate?.paymentEvidence?.state === 'EXPLICIT_VALUE' ||
     candidate?.paymentEvidence?.state === 'EXPLICIT_ZERO' ||
     candidate?.shippingEvidence?.state === 'EXPLICIT_VALUE' ||
     candidate?.shippingEvidence?.state === 'EXPLICIT_ZERO' ||
-    candidate?.deliveryEvidence?.state === 'EXPLICIT_VALUE';
+    candidate?.deliveryEvidence?.state === 'EXPLICIT_VALUE' ||
+    (typeof candidate?.deliveryEvidence?.courierName === 'string' && !!candidate.deliveryEvidence.courierName.trim()) ||
+    (typeof candidate?.deliveryEvidence?.trackingNumber === 'string' && !!candidate.deliveryEvidence.trackingNumber.trim()) ||
+    (typeof candidate?.courierName === 'string' && !!candidate.courierName.trim() && candidate.courierName !== 'Direct / Pickup') ||
+    (typeof candidate?.trackingNumber === 'string' && !!candidate.trackingNumber.trim()) ||
+    candidate?.paymentEvidence?.proofClaimed === true ||
+    candidate?.paymentProofClaimed === true ||
+    (typeof candidate?.claimedPaymentAmount === 'number' && candidate.claimedPaymentAmount > 0) ||
+    (typeof candidate?.transferReference === 'string' && !!candidate.transferReference.trim()) ||
+    (typeof candidate?.sourceEvidenceText === 'string' &&
+      /(?:resi|tracking|waybill|awb|connote|courier|kurir|ekspedisi|shipping label|package:)/i.test(candidate.sourceEvidenceText));
 }
 
 /** Preserve only omitted supported facts when a candidate continues the latest transaction. */
