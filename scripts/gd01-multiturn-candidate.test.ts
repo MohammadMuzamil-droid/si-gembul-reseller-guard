@@ -755,4 +755,143 @@ assert.equal(getLatestTransactionCandidate([
   { role: 'assistant', candidate: priorCandidate, transactionClosed: true },
 ]), undefined);
 
+
+// GD-01 Recipient Shipping Address Preservation & Confirmation Blocker Regression Tests:
+
+// 1. POSITIVE: Complete evidenced recipient address survives multi-turn flow through shipping receipt
+const posCustomerTurn = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "Mas, premium yang 250gr masih ada?\nPesan 2 bungkus ya. Tolong kirim ke adik saya Rina di Kediri.\nAlamatnya Jl. Melati No. 18, Kota Kediri. Nanti yang transfer suami saya Ahmad.\nAda mbak\nSiap mbak, saya proses.",
+  buyerName: "Siti Rahmawati",
+  payerName: "Ahmad",
+  recipientName: "Rina",
+  paymentMethod: "TRANSFER",
+  isPayerDifferentFromBuyer: true,
+  items: [{ rawText: "premium yang 250gr", productName: "Premium coffee (250g)", quantity: 2, matchedSku: "COFFEE-PREM-250" }],
+  shippingEvidence: { state: "UNSPECIFIED" },
+  identityFactStates: { buyerName: "EXPLICIT_VALUE", payerName: "EXPLICIT_VALUE", recipientName: "EXPLICIT_VALUE" },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Customer chat parsed.",
+}, undefined, "", true, INITIAL_CATALOG);
+
+assert.ok(posCustomerTurn.candidate?.recipientAddress, "Turn 1 must capture recipientAddress");
+assert.ok(posCustomerTurn.candidate.recipientAddress.includes("Melati No. 18"), "Turn 1 must contain Melati No. 18");
+
+const posAdminTurn = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "Kak, titip kirim Premium 250gr 2 pcs.\nBuyer Siti Rahmawati, penerima Rina Wulandari. Alamat JI. Melati No. 18, Kota Kediri.\nSiap. Ongkir Rp18.000.\nOke, total customer Rp68.000.",
+  items: posCustomerTurn.candidate.items,
+  shippingEvidence: { state: "EXPLICIT_VALUE", amount: 18000, chargeTo: "BUYER" },
+  identityFactStates: { buyerName: "UNSPECIFIED", payerName: "UNSPECIFIED", recipientName: "EXPLICIT_VALUE" },
+  recipientName: "Rina Wulandari",
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Admin chat parsed.",
+}, posCustomerTurn.candidate, "", true, INITIAL_CATALOG);
+
+assert.equal(posAdminTurn.candidate?.buyerOngkir, 18000);
+assert.ok(posAdminTurn.candidate?.recipientAddress.includes("Melati No. 18"), "Turn 2 must preserve recipientAddress");
+
+const posPaymentTurn = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "NusaPay\nPAYMENT SUCCESSFUL\nRp68.000\nFrom Ahmad Pratama\nTo Demo Reseller\nDate 03 Sep 2026 - 09:41 WIB\nReference NP-DEMO-030926-0941-6817",
+  items: posAdminTurn.candidate.items,
+  payerName: "Ahmad Pratama",
+  paymentMethod: "TRANSFER",
+  paymentEvidence: { state: "EXPLICIT_VALUE", amount: 68000, proofClaimed: true, reference: "NP-DEMO-030926-0941-6817" },
+  shippingEvidence: { state: "UNSPECIFIED" },
+  identityFactStates: { buyerName: "UNSPECIFIED", payerName: "EXPLICIT_VALUE", recipientName: "UNSPECIFIED" },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Payment parsed.",
+}, posAdminTurn.candidate, "", true, INITIAL_CATALOG);
+
+assert.equal(posPaymentTurn.candidate?.payerName, "Ahmad Pratama");
+assert.ok(posPaymentTurn.candidate?.recipientAddress.includes("Melati No. 18"), "Turn 3 must preserve recipientAddress");
+
+const posShippingTurn = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "SYNTHETIC DEMO SHIPPING LABEL\nNusa Parcel\nREG\n03 Sep 2026 11:08 WIB\nRECIPIENT\nRina Wulandari\nDESTINATION\nJI. Melati No. 18, Kota Kediri, Jawa Timur\nPACKAGE\nCoffee 2 pcs. 0.5 kg\nSERVICE\nREG\nTRACKING\nNPX-DEMO-260903-18427",
+  items: [{ productName: "Coffee 2 pcs. 0.5 kg", rawText: "Coffee 2 pcs. 0.5 kg", quantity: 2 }],
+  paymentEvidence: { state: "UNSPECIFIED" },
+  shippingEvidence: { state: "UNSPECIFIED" },
+  deliveryEvidence: { state: "EXPLICIT_VALUE", courierName: "NusaParcel", trackingNumber: "NPX-DEMO-260903-18427" },
+  identityFactStates: { buyerName: "UNSPECIFIED", payerName: "UNSPECIFIED", recipientName: "EXPLICIT_VALUE" },
+  recipientName: "Rina Wulandari",
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Shipping parsed.",
+}, posPaymentTurn.candidate, "", true, INITIAL_CATALOG);
+
+const finalCand = posShippingTurn.candidate;
+assert.ok(finalCand, "Final candidate must be defined");
+assert.equal(finalCand.buyerName, "Siti Rahmawati");
+assert.equal(finalCand.payerName, "Ahmad Pratama");
+assert.equal(finalCand.recipientName, "Rina Wulandari");
+assert.equal(finalCand.courierName, "NusaParcel");
+assert.equal(finalCand.trackingNumber, "NPX-DEMO-260903-18427");
+assert.equal(finalCand.items[0].matchedSku, "COFFEE-PREM-250");
+assert.equal(finalCand.items[0].quantity, 2);
+assert.equal(finalCand.buyerOngkir, 18000);
+assert.ok(finalCand.recipientAddress && finalCand.recipientAddress.length >= 5, "Final recipientAddress must be complete");
+assert.ok(finalCand.recipientAddress.includes("Melati No. 18"), "Final recipientAddress must contain street and number");
+
+const finalBlockers = getCandidateConfirmationBlockers(finalCand, matchItemsWithCatalog(finalCand.items, INITIAL_CATALOG, 20));
+assert.ok(!finalBlockers.includes("Add a complete recipient shipping address."), "Address blocker must NOT be present");
+assert.equal(finalBlockers.length, 0, "Final candidate must have zero confirmation blockers");
+
+// 2. NEGATIVE: Missing recipient address with expedition courier remains blocked
+const negMissingAddress = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "Mas, pesan Premium 2 bungkus ya. Tolong kirim pakai J&T Express.",
+  buyerName: "Siti Rahmawati",
+  items: [{ rawText: "Premium 2 bungkus", productName: "Premium coffee (250g)", quantity: 2, matchedSku: "COFFEE-PREM-250" }],
+  paymentMethod: "TRANSFER",
+  deliveryEvidence: { state: "EXPLICIT_VALUE", courierName: "J&T Express" },
+  identityFactStates: { buyerName: "EXPLICIT_VALUE", payerName: "UNSPECIFIED", recipientName: "UNSPECIFIED" },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Parsed without address.",
+}, undefined, "", false, INITIAL_CATALOG);
+
+const missingAddrBlockers = getCandidateConfirmationBlockers(
+  negMissingAddress.candidate,
+  matchItemsWithCatalog(negMissingAddress.candidate.items, INITIAL_CATALOG, 20)
+);
+assert.ok(missingAddrBlockers.includes("Add a complete recipient shipping address."), "Missing address MUST block confirmation");
+
+// 3. NEGATIVE: Truncated recipient address (< 5 chars) with expedition courier remains blocked
+const negShortAddress = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  sourceEvidenceText: "Mas, pesan Premium 2 bungkus. Kirim pakai JNE.",
+  buyerName: "Siti Rahmawati",
+  recipientAddress: "Jl",
+  items: [{ rawText: "Premium 2 bungkus", productName: "Premium coffee (250g)", quantity: 2, matchedSku: "COFFEE-PREM-250" }],
+  paymentMethod: "TRANSFER",
+  deliveryEvidence: { state: "EXPLICIT_VALUE", courierName: "JNE" },
+  identityFactStates: { buyerName: "EXPLICIT_VALUE", payerName: "UNSPECIFIED", recipientName: "UNSPECIFIED" },
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Parsed with short address.",
+}, undefined, "", false, INITIAL_CATALOG);
+
+const shortAddrBlockers = getCandidateConfirmationBlockers(
+  negShortAddress.candidate,
+  matchItemsWithCatalog(negShortAddress.candidate.items, INITIAL_CATALOG, 20)
+);
+assert.ok(shortAddrBlockers.includes("Add a complete recipient shipping address."), "Short address MUST block confirmation");
+
+// 4. NEGATIVE / CONTEXT PRESERVATION: A later incoming turn with truncated address ("Jl") cannot overwrite a valid prior address
+const truncatedIncomingTurn = resolveCandidateResponse({
+  responseMode: "TRANSACTION",
+  recipientAddress: "Jl",
+  items: posCustomerTurn.candidate.items,
+  confidence: 0.95,
+  ambiguities: [],
+  explanation: "Update.",
+}, posCustomerTurn.candidate, "", false, INITIAL_CATALOG);
+
+assert.ok(truncatedIncomingTurn.candidate?.recipientAddress.includes("Melati No. 18"), "Truncated address must not overwrite valid prior address");
+
 console.log('Run B focused multi-turn, financial authority, tracking, and Gayo resolution tests: PASS');

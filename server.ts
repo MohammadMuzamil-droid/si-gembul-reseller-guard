@@ -693,6 +693,7 @@ export function prepareTransactionCandidate(candidateData: any, catalog: any[] =
   normalizeAtomicShippingEvidence(candidate, factStates, addStructuredFactIssue);
   normalizeAtomicDeliveryEvidence(candidate, addStructuredFactIssue);
   reconcileExplicitIdentityFactsFromSource(candidate);
+  reconcileExplicitAddressFromSource(candidate);
 
   for (const field of EVIDENCE_FACT_FIELDS) {
     const hasDeclaredState = Object.prototype.hasOwnProperty.call(candidate.factStates || {}, field);
@@ -816,6 +817,29 @@ function reconcileExplicitIdentityFactsFromSource(candidate: any): void {
   }
 }
 
+/** Recover explicit recipient address from trusted source evidence when omitted or incomplete. */
+function reconcileExplicitAddressFromSource(candidate: any): void {
+  if (typeof candidate.sourceEvidenceText !== 'string' || !candidate.sourceEvidenceText.trim()) return;
+  if (typeof candidate.recipientAddress === 'string' && candidate.recipientAddress.trim().length >= 5) return;
+  const explicitMatch = candidate.sourceEvidenceText.match(
+    /(?:^|\s)(?:address|alamat(?:nya)?|destination|tujuan)[:=\s]+([^\r\n]+)/i
+  );
+  const match = explicitMatch || candidate.sourceEvidenceText.match(/(?:kirim\s+ke)[:=\s]+([^\r\n]+)/i);
+  if (match && match[1]) {
+    let rawAddress = match[1].trim();
+    const boundary = rawAddress.match(
+      /^(.*?)(?=\s*\b(?:nanti\s+yang|ongkir|siap|total|service|tracking|package|order|payment|buyer|payer|recipient)\b)/i
+    );
+    if (boundary && boundary[1]) {
+      rawAddress = boundary[1].trim();
+    }
+    rawAddress = rawAddress.replace(/[.,;]+$/, '').trim();
+    if (rawAddress.length >= 5) {
+      candidate.recipientAddress = rawAddress;
+    }
+  }
+}
+
 /**
  * Explicit multi-item order syntax is deterministic evidence. If the model
  * collapses those clauses into a different item shape, prefer the catalog
@@ -926,7 +950,9 @@ function hasSupportedValue(candidate: any, field: string): boolean {
 function hasSupportedContextValue(candidate: any, field: string): boolean {
   if (!hasSupportedValue(candidate, field)) return false;
   const identityFields = ['buyerName', 'payerName', 'recipientName'];
-  return !identityFields.includes(field) || !isPlaceholderBuyer(normalizedIdentity(candidate[field]));
+  if (identityFields.includes(field) && isPlaceholderBuyer(normalizedIdentity(candidate[field]))) return false;
+  if (field === 'recipientAddress' && typeof candidate[field] === 'string' && candidate[field].trim().length < 5) return false;
+  return true;
 }
 
 function normalizedIdentity(value: unknown): string {
@@ -1241,6 +1267,7 @@ Your mission:
    - "Customer/reference:", "Buyer:", "Pelanggan:", "a.n:" -> extract as customer/buyer/reference name. Verbatim preserve explicit codes (e.g. "TEST-FINANCE-A", "TEST-ISOLATION-A", "CUST-01").
    - "Order:", "Pesanan:", "Item:", "Produk:" -> extract ordered items with their explicit quantities and product names.
    - "Payment:", "Pembayaran:", "Bayar:" -> extract payment amount and method.
+   - "Address:", "Alamat:", "Alamatnya:", "Destination:", "Tujuan:", "Kirim ke:" -> extract as recipientAddress and recipientCity.
 3. Handle product catalog matching and normalization:
    - Return sourceEvidenceText on every response. It must be a verbatim transcription of transaction-relevant text visible in the LATEST message or image only. Do not include prior context or catalog expansions in it.
    - The item's rawText is the evidence anchor. Copy only the literal product phrase visible in the latest message/image. Never rewrite rawText to a catalog name or add origin, roast, size, or variant words that are not visibly present.
@@ -1682,12 +1709,20 @@ export function fallbackDeterministicParser(text: string, catalog: any[] = []) {
   const finalRecipientName = exactRecipientName || finalBuyerName;
 
   // 5. Detect shipping / courier / address section
-  const addressSection = extractSection(text, ['address', 'alamat', 'kirim ke', 'tujuan', 'lokasi']);
+  const addressSection = extractSection(text, ['address', 'alamat', 'alamatnya', 'destination', 'kirim ke', 'tujuan', 'lokasi']);
   let detectedAddress = addressSection || '';
   if (!detectedAddress) {
-    const addressMatch = text.match(/(?:kirim ke|alamat|tujuan|address)[:\s]+([^,\.\n]+(?:,\s*[^,\.\n]+)*)/i);
-    if (addressMatch) {
-      detectedAddress = addressMatch[1].trim();
+    const explicitMatch = text.match(/(?:address|alamat(?:nya)?|destination|tujuan)[:=\s]+([^\r\n]+)/i);
+    const addressMatch = explicitMatch || text.match(/(?:kirim\s+ke)[:=\s]+([^\r\n]+)/i);
+    if (addressMatch && addressMatch[1]) {
+      let rawAddress = addressMatch[1].trim();
+      const boundary = rawAddress.match(
+        /^(.*?)(?=\s*\b(?:nanti\s+yang|ongkir|siap|total|service|tracking|package|order|payment|buyer|payer|recipient)\b)/i
+      );
+      if (boundary && boundary[1]) {
+        rawAddress = boundary[1].trim();
+      }
+      detectedAddress = rawAddress.replace(/[.,;]+$/, '').trim();
     }
   }
 
