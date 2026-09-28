@@ -615,7 +615,7 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
             <div>
               <div className="font-bold text-slate-900">{activeCand.payerName || 'Payer not specified'}</div>
               <div className="text-slate-500">
-                {activeCand.payerBank ? `Bank ${activeCand.payerBank}` : 'Method: ' + (activeCand.paymentMethod || 'TRANSFER')}
+                {activeCand.payerBank ? `Bank ${activeCand.payerBank}` : activeCand.paymentMethod ? `Method: ${activeCand.paymentMethod}` : 'Method not specified'}
               </div>
             </div>
           )}
@@ -790,10 +790,11 @@ const CandidateActionCard: React.FC<CandidateActionCardProps> = ({
               💳 Payment Method
             </span>
             <select
-              value={activeCand.paymentMethod || 'TRANSFER'}
+              value={activeCand.paymentMethod || ''}
               onChange={(e) => onUpdateEditedCandidate({ ...activeCand, paymentMethod: e.target.value as PaymentMethod })}
               className="w-full p-1.5 bg-white border border-slate-300 rounded text-xs text-slate-800"
             >
+              <option value="" disabled>Choose a payment method</option>
               <option value="TRANSFER">Bank Transfer / QRIS (Transfer)</option>
               <option value="COD">COD Expedition Courier</option>
               <option value="DIRECT_COD">Direct COD (Kurir Sendiri / Cash on Delivery)</option>
